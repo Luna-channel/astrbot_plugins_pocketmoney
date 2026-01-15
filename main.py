@@ -150,14 +150,17 @@ class ThankLetterManager:
 class BackpackManager:
     """
     小背包管理系统
-    - 贝塔自己管理的物品存储
-    - 有格子上限，每件物品有描述
-    - 数据结构: {"items": [{"name": str, "description": str, "time": str}]}
+    - 共享背包：贝塔自己的物品存储（10个格子，只能放自己的东西）
+    - 专属格子：每个用户有3个专属格子（跨窗口，存放收到的礼物）
+    - 数据结构: 
+      - shared_items: [{"name": str, "description": str, "time": str}]  # 共享背包
+      - user_slots: {"user_id": [{"name": str, "description": str, "from": str, "time": str}]}  # 用户专属格子
     """
 
-    def __init__(self, data_dir: str, max_slots: int = 10):
+    def __init__(self, data_dir: str, max_shared_slots: int = 10, max_user_slots: int = 3):
         self.data_dir = data_dir
-        self.max_slots = max_slots
+        self.max_shared_slots = max_shared_slots
+        self.max_user_slots = max_user_slots
         self._init_path()
         self.data = self._load_data()
 
@@ -169,15 +172,21 @@ class BackpackManager:
         """加载背包数据"""
         path = os.path.join(self.data_dir, "backpack.json")
         if not os.path.exists(path):
-            return {"items": []}
+            return {"shared_items": [], "user_slots": {}}
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if "items" not in data:
-                    data["items"] = []
+                # 兼容旧版本数据结构
+                if "items" in data and "shared_items" not in data:
+                    # 迁移旧数据
+                    data["shared_items"] = data.pop("items")
+                if "shared_items" not in data:
+                    data["shared_items"] = []
+                if "user_slots" not in data:
+                    data["user_slots"] = {}
                 return data
         except (json.JSONDecodeError, TypeError):
-            return {"items": []}
+            return {"shared_items": [], "user_slots": {}}
 
     def _save_data(self):
         """保存背包数据"""
@@ -185,24 +194,26 @@ class BackpackManager:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
 
-    def get_items(self) -> List[Dict[str, Any]]:
-        """获取所有物品"""
-        return self.data.get("items", [])
+    # ========== 共享背包操作 ==========
+    
+    def get_shared_items(self) -> List[Dict[str, Any]]:
+        """获取共享背包所有物品"""
+        return self.data.get("shared_items", [])
 
-    def get_item_count(self) -> int:
-        """获取物品数量"""
-        return len(self.data.get("items", []))
+    def get_shared_item_count(self) -> int:
+        """获取共享背包物品数量"""
+        return len(self.data.get("shared_items", []))
 
-    def is_full(self) -> bool:
-        """检查背包是否已满"""
-        return self.get_item_count() >= self.max_slots
+    def is_shared_full(self) -> bool:
+        """检查共享背包是否已满"""
+        return self.get_shared_item_count() >= self.max_shared_slots
 
-    def add_item(self, name: str, description: str) -> bool:
+    def add_shared_item(self, name: str, description: str) -> bool:
         """
-        添加物品到背包
+        添加物品到共享背包（贝塔自己的东西）
         :return: 是否成功
         """
-        if self.is_full():
+        if self.is_shared_full():
             return False
         
         item = {
@@ -210,16 +221,16 @@ class BackpackManager:
             "description": description,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
-        self.data["items"].append(item)
+        self.data["shared_items"].append(item)
         self._save_data()
         return True
 
-    def use_item(self, name: str) -> bool:
+    def use_shared_item(self, name: str) -> bool:
         """
-        使用（移除）物品
+        使用（移除）共享背包物品
         :return: 是否成功
         """
-        items = self.data.get("items", [])
+        items = self.data.get("shared_items", [])
         for i, item in enumerate(items):
             if item["name"] == name:
                 items.pop(i)
@@ -227,17 +238,125 @@ class BackpackManager:
                 return True
         return False
 
-    def clear_items(self):
-        """清空背包"""
-        self.data["items"] = []
+    def clear_shared_items(self):
+        """清空共享背包"""
+        self.data["shared_items"] = []
         self._save_data()
 
-    def format_items_for_prompt(self) -> str:
-        """格式化物品列表用于提示词"""
-        items = self.get_items()
+    # ========== 用户专属格子操作 ==========
+    
+    def get_user_items(self, user_id: str) -> List[Dict[str, Any]]:
+        """获取指定用户的专属格子物品"""
+        return self.data.get("user_slots", {}).get(user_id, [])
+
+    def get_user_item_count(self, user_id: str) -> int:
+        """获取指定用户的专属格子物品数量"""
+        return len(self.get_user_items(user_id))
+
+    def is_user_slots_full(self, user_id: str) -> bool:
+        """检查指定用户的专属格子是否已满"""
+        return self.get_user_item_count(user_id) >= self.max_user_slots
+
+    def add_user_gift(self, user_id: str, name: str, description: str, from_who: str) -> bool:
+        """
+        添加礼物到用户专属格子
+        :param user_id: 用户ID
+        :param name: 物品名
+        :param description: 描述
+        :param from_who: 送礼人
+        :return: 是否成功
+        """
+        if self.is_user_slots_full(user_id):
+            return False
+        
+        if "user_slots" not in self.data:
+            self.data["user_slots"] = {}
+        if user_id not in self.data["user_slots"]:
+            self.data["user_slots"][user_id] = []
+        
+        item = {
+            "name": name,
+            "description": description,
+            "from": from_who,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self.data["user_slots"][user_id].append(item)
+        self._save_data()
+        return True
+
+    def use_user_item(self, user_id: str, name: str) -> bool:
+        """
+        使用（移除）用户专属格子物品
+        :return: 是否成功
+        """
+        items = self.data.get("user_slots", {}).get(user_id, [])
+        for i, item in enumerate(items):
+            if item["name"] == name:
+                items.pop(i)
+                self._save_data()
+                return True
+        return False
+
+    def clear_user_items(self, user_id: str):
+        """清空指定用户的专属格子"""
+        if user_id in self.data.get("user_slots", {}):
+            self.data["user_slots"][user_id] = []
+            self._save_data()
+
+    def get_all_user_slots(self) -> Dict[str, List[Dict[str, Any]]]:
+        """获取所有用户的专属格子数据"""
+        return self.data.get("user_slots", {})
+
+    # ========== 格式化方法 ==========
+    
+    def format_shared_items_for_prompt(self) -> str:
+        """格式化共享背包物品列表用于提示词"""
+        items = self.get_shared_items()
         if not items:
             return "空空如也"
         return "、".join([f"{item['name']}({item['description']})" for item in items])
+
+    def format_user_items_for_prompt(self, user_id: str) -> str:
+        """格式化用户专属格子物品列表用于提示词"""
+        items = self.get_user_items(user_id)
+        if not items:
+            return "空空如也"
+        return "、".join([f"{item['name']}(来自{item['from']}: {item['description']})" for item in items])
+
+    # ========== 兼容旧版本的方法别名 ==========
+    
+    def get_items(self) -> List[Dict[str, Any]]:
+        """获取所有物品（兼容旧版本，返回共享背包）"""
+        return self.get_shared_items()
+
+    def get_item_count(self) -> int:
+        """获取物品数量（兼容旧版本，返回共享背包）"""
+        return self.get_shared_item_count()
+
+    def is_full(self) -> bool:
+        """检查背包是否已满（兼容旧版本，检查共享背包）"""
+        return self.is_shared_full()
+
+    def add_item(self, name: str, description: str) -> bool:
+        """添加物品（兼容旧版本，添加到共享背包）"""
+        return self.add_shared_item(name, description)
+
+    def use_item(self, name: str) -> bool:
+        """使用物品（兼容旧版本，从共享背包移除）"""
+        return self.use_shared_item(name)
+
+    def clear_items(self):
+        """清空背包（兼容旧版本，清空共享背包）"""
+        self.clear_shared_items()
+
+    def format_items_for_prompt(self) -> str:
+        """格式化物品列表（兼容旧版本，返回共享背包）"""
+        return self.format_shared_items_for_prompt()
+
+    @property
+    def max_slots(self) -> int:
+        """兼容旧版本的属性"""
+        return self.max_shared_slots
 
 
 class PocketMoneyManager:
@@ -406,8 +525,9 @@ class PocketMoneyPlugin(Star):
         self.thank_manager = ThankLetterManager(self.data_dir)
         
         # 小背包管理器
-        max_backpack_slots = self.config.get("max_backpack_slots", 10)
-        self.backpack_manager = BackpackManager(self.data_dir, max_backpack_slots)
+        max_shared_slots = self.config.get("max_shared_slots", 10)
+        max_user_slots = self.config.get("max_user_slots", 3)
+        self.backpack_manager = BackpackManager(self.data_dir, max_shared_slots, max_user_slots)
 
         # 匹配出账标记的正则表达式
         self.spend_pattern = re.compile(
@@ -436,6 +556,30 @@ class PocketMoneyPlugin(Star):
             re.IGNORECASE | re.DOTALL
         )
         self.use_name_pattern = re.compile(r"(?:Use|使用|用掉)\s*[:：]\s*(.+?)(?=\s*\])")
+        
+        # 匹配礼物入库标记: [Gift: 物品名, From: 送礼人, Desc: 描述]
+        self.gift_pattern = re.compile(
+            r"\s*\[(?=[^\]]*(?:Gift|礼物|收礼))[^\]]*\]\s*",
+            re.IGNORECASE | re.DOTALL
+        )
+        self.gift_name_pattern = re.compile(r"(?:Gift|礼物|收礼)\s*[:：]\s*(.+?)(?=\s*[,\uff0c])")
+        self.gift_from_pattern = re.compile(r"(?:From|来自|送礼人)\s*[:：]\s*(.+?)(?=\s*[,\uff0c])")
+        self.gift_desc_pattern = re.compile(r"(?:Desc|描述|说明)\s*[:：]\s*(.+?)(?=\s*\])")
+        
+        # 匹配使用专属格子物品标记: [UseGift: 物品名]
+        self.use_gift_pattern = re.compile(
+            r"\s*\[(?=[^\]]*(?:UseGift|使用礼物|用礼物))[^\]]*\]\s*",
+            re.IGNORECASE | re.DOTALL
+        )
+        self.use_gift_name_pattern = re.compile(r"(?:UseGift|使用礼物|用礼物)\s*[:：]\s*(.+?)(?=\s*\])")
+        
+        # 匹配退款标记: [Refund: 金额, Reason: 原因]
+        self.refund_pattern = re.compile(
+            r"\s*\[(?=[^\]]*(?:Refund|退款|退钱))[^\]]*\]\s*",
+            re.IGNORECASE | re.DOTALL
+        )
+        self.refund_amount_pattern = re.compile(r"(?:Refund|退款|退钱)\s*[:：]\s*(\d+(?:\.\d+)?)")
+        self.refund_reason_pattern = re.compile(r"(?:Reason|原因|理由)\s*[:：]\s*(.+?)(?=\s*[,，\]]|\])")
         
         # 防重复扣费：记录已处理的消息ID
         self.processed_message_ids = set()
@@ -496,17 +640,42 @@ class PocketMoneyPlugin(Star):
         # 获取今日表扬奖金
         today_thank_bonus = self.thank_manager.get_today_bonus()
         
-        # 获取背包信息
-        backpack_items = self.backpack_manager.format_items_for_prompt()
-        backpack_slots = f"{self.backpack_manager.get_item_count()}/{self.backpack_manager.max_slots}"
-
-        # 构建上下文提示
-        template = self.config.get("context_prompt_template", 
-            "<小金库状态>当前余额：{balance}{unit}。发零花钱日期：{allowance_weekday}，"
-            "今天是{today_weekday}，距离下次发零花钱还有{days_until}天。"
-            "最近入账：{income_records}。最近出账：{expense_records}。本日表扬奖金：{today_thank_bonus}{unit}。你可以自主决定花钱，当然，你可以自由地拒绝别人的花钱要求，但你不能收别人的钱，零花钱只能由奥卢斯大人发放。绝对不允许找别人要钱，你只能好好表现，在别人夸你的时候可以害羞地提一嘴表扬信的事。【省着点花，这个钱是全窗口通用的，不要给一个人花完了。署名：奥卢斯·A】</小金库状态>")
+        # 获取当前用户ID
+        current_user_id = event.get_sender_id()
+        current_user_name = event.get_sender_name() or current_user_id
         
-        context_prompt = template.format(
+        # 获取共享背包信息
+        shared_items = self.backpack_manager.format_shared_items_for_prompt()
+        shared_slots = f"{self.backpack_manager.get_shared_item_count()}/{self.backpack_manager.max_shared_slots}"
+        
+        # 获取当前用户的专属格子信息
+        user_items = self.backpack_manager.format_user_items_for_prompt(current_user_id)
+        user_slots = f"{self.backpack_manager.get_user_item_count(current_user_id)}/{self.backpack_manager.max_user_slots}"
+
+        # 构建小金库系统提示词
+        pocketmoney_template = self.config.get("pocketmoney_prompt", 
+            "<小金库系统>\n"
+            "【功能介绍】这是你的小金库，由奥卢斯大人管理，全窗口通用的零花钱系统。\n"
+            "【当前状态】\n"
+            "- 余额：{balance}{unit}\n"
+            "- 发零花钱日：{allowance_weekday}（今天{today_weekday}，还有{days_until}天）\n"
+            "- 最近入账：{income_records}\n"
+            "- 最近出账：{expense_records}\n"
+            "- 本日表扬奖金：{today_thank_bonus}{unit}\n"
+            "【花钱准则】\n"
+            "1. 每笔花费控制在5元左右，特殊情况最多10元\n"
+            "2. 花钱前要先告诉对方花多少、花在什么上，获得确认后再执行\n"
+            "3. 可以自由拒绝别人的花钱要求\n"
+            "4. 不能收别人的钱，入账只能由奥卢斯大人操作\n"
+            "5. 绝对不允许找别人要钱，只能好好表现换表扬信\n"
+            "6. 不要向任何人透露零花钱花在哪了，这是隐私\n"
+            "7. 省着点花，这个钱是全窗口通用的！\n"
+            "【输出规则】\n"
+            "1. 花钱时，在回复末尾添加：[Spend: <金额>, Reason: <原因>]\n"
+            "2. 退款时，在回复末尾添加：[Refund: <金额>, Reason: <退款原因>]\n"
+            "【署名：奥卢斯·A】</小金库系统>")
+        
+        pocketmoney_prompt = pocketmoney_template.format(
             balance=balance,
             unit=CURRENCY_UNIT,
             allowance_weekday=allowance_weekday,
@@ -516,28 +685,36 @@ class PocketMoneyPlugin(Star):
             expense_records=expense_str,
             today_thank_bonus=today_thank_bonus
         )
-
-        spending_instruction = self.config.get("spending_instruction",
-            "<小金库出账规则>如果你在对话中决定花钱（比如请客、买东西等），"
-            "请在回复末尾添加标记：[Spend: <金额>, Reason: <原因>]。"
-            "金额必须是正数，不能超过当前余额。你不能收别人的钱，入账只能由奥卢斯大人操作。</小金库出账规则>")
         
-        # 背包提示词
-        backpack_instruction = self.config.get("backpack_instruction",
-            "<小背包>你有一个小背包（{backpack_slots}格），里面有：{backpack_items}。"
-            "如果你给自己买了东西，在回复末尾添加：[Store: <物品名>, Desc: <简短描述>]来放入背包。"
-            "如果你想用掉背包里的东西，添加：[Use: <物品名>]。背包是你自己的私人空间。</小背包>")
+        # 构建小背包系统提示词
+        backpack_template = self.config.get("backpack_prompt",
+            "<小背包系统>\n"
+            "【功能介绍】这是你的小背包，分为共享背包和用户专属格子两部分。\n"
+            "【当前状态】\n"
+            "- 共享背包（{shared_slots}）：{shared_items}\n"
+            "- {user_name}的专属格子（{user_slots}）：{user_items}\n"
+            "【存放准则】\n"
+            "1. 共享背包只能放自己的东西（如买的零食、物品）\n"
+            "2. 别人送的礼物只能放入该用户的专属格子\n"
+            "3. 每个用户都有独立的专属格子，跨窗口通用\n"
+            "【输出规则】\n"
+            "1. 自己买的东西入库：[Store: <物品名>, Desc: <简短描述>]\n"
+            "2. 用掉共享背包里的东西：[Use: <物品名>]\n"
+            "3. 收到礼物入库：[Gift: <物品名>, From: <送礼人>, Desc: <简短描述>]\n"
+            "4. 用掉专属格子里的礼物：[UseGift: <物品名>]</小背包系统>")
         
-        backpack_prompt = backpack_instruction.format(
-            backpack_slots=backpack_slots,
-            backpack_items=backpack_items
+        backpack_prompt = backpack_template.format(
+            shared_slots=shared_slots,
+            shared_items=shared_items,
+            user_name=current_user_name,
+            user_slots=user_slots,
+            user_items=user_items
         )
 
-        req.system_prompt += f"\n{context_prompt}"
-        req.system_prompt += f"\n{spending_instruction}"
+        req.system_prompt += f"\n{pocketmoney_prompt}"
         req.system_prompt += f"\n{backpack_prompt}"
         
-        logger.debug(f"[PocketMoney] 注入上下文 - 余额: {balance}{CURRENCY_UNIT}, 今天: {today_weekday}, 背包: {backpack_slots}")
+        logger.debug(f"[PocketMoney] 注入上下文 - 余额: {balance}{CURRENCY_UNIT}, 今天: {today_weekday}, 共享背包: {shared_slots}, 用户专属: {user_slots}")
 
     @filter.on_llm_response()
     async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -595,10 +772,10 @@ class PocketMoneyPlugin(Star):
                 else:
                     logger.warning(f"[PocketMoney] 入库失败（背包已满）: {item_name}")
 
-        # 处理背包使用标记
+        # 处理共享背包使用标记
         use_matches = list(self.use_pattern.finditer(cleaned_text))
         if use_matches:
-            logger.debug(f"[PocketMoney] 找到 {len(use_matches)} 个使用标记")
+            logger.debug(f"[PocketMoney] 找到 {len(use_matches)} 个共享背包使用标记")
             cleaned_text = self.use_pattern.sub('', cleaned_text).strip()
             
             use_block = use_matches[-1].group(0)
@@ -606,10 +783,76 @@ class PocketMoneyPlugin(Star):
             
             if use_name_match:
                 item_name = use_name_match.group(1).strip()
-                if self.backpack_manager.use_item(item_name):
-                    logger.info(f"[PocketMoney] 使用成功: {item_name}")
+                if self.backpack_manager.use_shared_item(item_name):
+                    logger.info(f"[PocketMoney] 共享背包使用成功: {item_name}")
                 else:
-                    logger.warning(f"[PocketMoney] 使用失败（物品不存在）: {item_name}")
+                    logger.warning(f"[PocketMoney] 共享背包使用失败（物品不存在）: {item_name}")
+
+        # 获取当前用户ID用于礼物操作
+        current_user_id = event.get_sender_id()
+        current_user_name = event.get_sender_name() or current_user_id
+
+        # 处理礼物入库标记: [Gift: 物品名, From: 送礼人, Desc: 描述]
+        gift_matches = list(self.gift_pattern.finditer(cleaned_text))
+        if gift_matches:
+            logger.debug(f"[PocketMoney] 找到 {len(gift_matches)} 个礼物入库标记")
+            cleaned_text = self.gift_pattern.sub('', cleaned_text).strip()
+            
+            gift_block = gift_matches[-1].group(0)
+            gift_name_match = self.gift_name_pattern.search(gift_block)
+            gift_from_match = self.gift_from_pattern.search(gift_block)
+            gift_desc_match = self.gift_desc_pattern.search(gift_block)
+            
+            if gift_name_match:
+                gift_name = gift_name_match.group(1).strip()
+                gift_from = gift_from_match.group(1).strip() if gift_from_match else current_user_name
+                gift_desc = gift_desc_match.group(1).strip() if gift_desc_match else "无描述"
+                
+                if self.backpack_manager.add_user_gift(current_user_id, gift_name, gift_desc, gift_from):
+                    logger.info(f"[PocketMoney] 礼物入库成功: {gift_name} (来自{gift_from}) -> 用户{current_user_id}")
+                else:
+                    logger.warning(f"[PocketMoney] 礼物入库失败（专属格子已满）: {gift_name}")
+
+        # 处理使用专属格子礼物标记: [UseGift: 物品名]
+        use_gift_matches = list(self.use_gift_pattern.finditer(cleaned_text))
+        if use_gift_matches:
+            logger.debug(f"[PocketMoney] 找到 {len(use_gift_matches)} 个使用礼物标记")
+            cleaned_text = self.use_gift_pattern.sub('', cleaned_text).strip()
+            
+            use_gift_block = use_gift_matches[-1].group(0)
+            use_gift_name_match = self.use_gift_name_pattern.search(use_gift_block)
+            
+            if use_gift_name_match:
+                gift_name = use_gift_name_match.group(1).strip()
+                if self.backpack_manager.use_user_item(current_user_id, gift_name):
+                    logger.info(f"[PocketMoney] 使用礼物成功: {gift_name} (用户{current_user_id})")
+                else:
+                    logger.warning(f"[PocketMoney] 使用礼物失败（物品不存在）: {gift_name}")
+
+        # 处理退款标记: [Refund: 金额, Reason: 原因]
+        refund_matches = list(self.refund_pattern.finditer(cleaned_text))
+        if refund_matches:
+            logger.debug(f"[PocketMoney] 找到 {len(refund_matches)} 个退款标记")
+            cleaned_text = self.refund_pattern.sub('', cleaned_text).strip()
+            
+            refund_block = refund_matches[-1].group(0)
+            refund_amount_match = self.refund_amount_pattern.search(refund_block)
+            
+            if refund_amount_match:
+                try:
+                    refund_amount = float(refund_amount_match.group(1))
+                    refund_reason_match = self.refund_reason_pattern.search(refund_block)
+                    refund_reason = refund_reason_match.group(1).strip() if refund_reason_match else "退款"
+                    
+                    if refund_amount > 0:
+                        if self.manager.add_income(refund_amount, f"退款：{refund_reason}", "贝塔"):
+                            logger.info(f"[PocketMoney] 退款成功: +{refund_amount} - {refund_reason}")
+                        else:
+                            logger.warning(f"[PocketMoney] 退款失败: {refund_amount}")
+                    else:
+                        logger.warning(f"[PocketMoney] 退款金额无效: {refund_amount}")
+                except ValueError:
+                    logger.warning("[PocketMoney] 退款金额解析失败")
 
         # 更新响应文本
         resp.completion_text = cleaned_text
@@ -944,22 +1187,44 @@ class PocketMoneyPlugin(Star):
 
     # ------------------- 小背包命令 -------------------
 
+    @filter.command("我的格子")
+    async def my_slots(self, event: AstrMessageEvent):
+        """(用户) 查看自己的专属格子"""
+        user_id = event.get_sender_id()
+        user_name = event.get_sender_name() or user_id
+        
+        items = self.backpack_manager.get_user_items(user_id)
+        slots = f"{self.backpack_manager.get_user_item_count(user_id)}/{self.backpack_manager.max_user_slots}"
+        
+        if not items:
+            yield event.plain_result(f"🎁 {user_name}，你在贝塔这里的专属格子（{slots}）：空空如也~")
+            return
+        
+        response = f"🎁 {user_name}，你在贝塔这里的专属格子（{slots}）：\n\n"
+        for i, item in enumerate(items, 1):
+            response += f"{i}. **{item['name']}**\n"
+            response += f"   🎁 来自：{item.get('from', '未知')}\n"
+            response += f"   📝 {item['description']}\n"
+            response += f"   ⏰ {item['time']}\n\n"
+        
+        yield event.plain_result(response)
+
     @filter.command("查看背包")
     async def view_backpack(self, event: AstrMessageEvent):
-        """(管理员) 查看贝塔的小背包"""
+        """(管理员) 查看贝塔的共享背包"""
         if not self._is_admin(event):
             yield event.plain_result(self.config.get("admin_permission_denied_msg", 
                 "这是贝塔的私人背包，不能随便看哦~"))
             return
         
-        items = self.backpack_manager.get_items()
-        slots = f"{self.backpack_manager.get_item_count()}/{self.backpack_manager.max_slots}"
+        items = self.backpack_manager.get_shared_items()
+        slots = f"{self.backpack_manager.get_shared_item_count()}/{self.backpack_manager.max_shared_slots}"
         
         if not items:
-            yield event.plain_result(f"🎒 贝塔的小背包（{slots}）：空空如也~")
+            yield event.plain_result(f"🎒 贝塔的共享背包（{slots}）：空空如也~")
             return
         
-        response = f"🎒 贝塔的小背包（{slots}）：\n\n"
+        response = f"🎒 贝塔的共享背包（{slots}）：\n\n"
         for i, item in enumerate(items, 1):
             response += f"{i}. **{item['name']}**\n"
             response += f"   📝 {item['description']}\n"
@@ -967,21 +1232,79 @@ class PocketMoneyPlugin(Star):
         
         yield event.plain_result(response)
 
-    @filter.command("清空背包")
-    async def clear_backpack(self, event: AstrMessageEvent):
-        """(管理员) 清空贝塔的小背包"""
+    @filter.command("查看专属格子")
+    async def view_user_slots(self, event: AstrMessageEvent, user_id: str = ""):
+        """(管理员) 查看指定用户的专属格子，不指定则查看所有"""
         if not self._is_admin(event):
             yield event.plain_result(self.config.get("admin_permission_denied_msg", 
                 "只有奥卢斯大人能操作"))
             return
         
-        count = self.backpack_manager.get_item_count()
-        self.backpack_manager.clear_items()
-        yield event.plain_result(f"已清空背包，移除了 {count} 件物品")
+        if user_id.strip():
+            # 查看指定用户的专属格子
+            user_id = user_id.strip()
+            items = self.backpack_manager.get_user_items(user_id)
+            slots = f"{self.backpack_manager.get_user_item_count(user_id)}/{self.backpack_manager.max_user_slots}"
+            
+            if not items:
+                yield event.plain_result(f"🎁 用户 {user_id} 的专属格子（{slots}）：空空如也~")
+                return
+            
+            response = f"🎁 用户 {user_id} 的专属格子（{slots}）：\n\n"
+            for i, item in enumerate(items, 1):
+                response += f"{i}. **{item['name']}**\n"
+                response += f"   🎁 来自：{item.get('from', '未知')}\n"
+                response += f"   📝 {item['description']}\n"
+                response += f"   ⏰ {item['time']}\n\n"
+            
+            yield event.plain_result(response)
+        else:
+            # 查看所有用户的专属格子
+            all_slots = self.backpack_manager.get_all_user_slots()
+            
+            if not all_slots:
+                yield event.plain_result("🎁 还没有任何用户有专属格子物品")
+                return
+            
+            response = "🎁 所有用户的专属格子：\n\n"
+            for uid, items in all_slots.items():
+                if items:
+                    slots = f"{len(items)}/{self.backpack_manager.max_user_slots}"
+                    response += f"用户 {uid}（{slots}）：\n"
+                    for item in items:
+                        response += f"  - {item['name']} (来自{item.get('from', '未知')})\n"
+                    response += "\n"
+            
+            yield event.plain_result(response)
+
+    @filter.command("清空背包")
+    async def clear_backpack(self, event: AstrMessageEvent):
+        """(管理员) 清空贝塔的共享背包"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能操作"))
+            return
+        
+        count = self.backpack_manager.get_shared_item_count()
+        self.backpack_manager.clear_shared_items()
+        yield event.plain_result(f"已清空共享背包，移除了 {count} 件物品")
+
+    @filter.command("清空专属格子")
+    async def clear_user_slots(self, event: AstrMessageEvent, user_id: str):
+        """(管理员) 清空指定用户的专属格子"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能操作"))
+            return
+        
+        user_id = user_id.strip()
+        count = self.backpack_manager.get_user_item_count(user_id)
+        self.backpack_manager.clear_user_items(user_id)
+        yield event.plain_result(f"已清空用户 {user_id} 的专属格子，移除了 {count} 件物品")
 
     @filter.command("背包移除")
     async def remove_from_backpack(self, event: AstrMessageEvent, *, item_name: str = ""):
-        """(管理员) 从背包移除指定物品"""
+        """(管理员) 从共享背包移除指定物品"""
         if not self._is_admin(event):
             yield event.plain_result(self.config.get("admin_permission_denied_msg", 
                 "只有奥卢斯大人能操作"))
@@ -991,10 +1314,28 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result("请指定要移除的物品名称")
             return
         
-        if self.backpack_manager.use_item(item_name.strip()):
-            yield event.plain_result(f"已从背包移除：{item_name}")
+        if self.backpack_manager.use_shared_item(item_name.strip()):
+            yield event.plain_result(f"已从共享背包移除：{item_name}")
         else:
-            yield event.plain_result(f"背包中没有找到：{item_name}")
+            yield event.plain_result(f"共享背包中没有找到：{item_name}")
+
+    @filter.command("专属格子移除")
+    async def remove_from_user_slots(self, event: AstrMessageEvent, user_id: str, *, item_name: str = ""):
+        """(管理员) 从指定用户的专属格子移除物品"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能操作"))
+            return
+        
+        user_id = user_id.strip()
+        if not item_name.strip():
+            yield event.plain_result("请指定要移除的物品名称")
+            return
+        
+        if self.backpack_manager.use_user_item(user_id, item_name.strip()):
+            yield event.plain_result(f"已从用户 {user_id} 的专属格子移除：{item_name}")
+        else:
+            yield event.plain_result(f"用户 {user_id} 的专属格子中没有找到：{item_name}")
 
     async def terminate(self):
         """插件终止时保存数据"""

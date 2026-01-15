@@ -5,11 +5,17 @@
         "default": 0,
         "hint": "小金库的初始余额（单位：元）"
     },
-    "max_backpack_slots": {
-        "description": "背包格子上限",
+    "max_shared_slots": {
+        "description": "共享背包格子上限",
         "type": "int",
         "default": 10,
-        "hint": "贝塔小背包最多能装多少件物品"
+        "hint": "贝塔共享背包最多能装多少件物品（只能放自己的东西）"
+    },
+    "max_user_slots": {
+        "description": "用户专属格子上限",
+        "type": "int",
+        "default": 3,
+        "hint": "每个用户的专属格子数量（跨窗口，存放收到的礼物）"
     },
     "thank_letter_min_amount": {
         "description": "表扬信最小奖金",
@@ -59,23 +65,17 @@
         "default": 1,
         "hint": "每周几发零花钱（1=周一，7=周日）"
     },
-    "context_prompt_template": {
-        "description": "上下文提示词模板",
+    "pocketmoney_prompt": {
+        "description": "小金库系统提示词",
         "type": "text",
-        "default": "<小金库状态>当前余额：{balance}{unit}。发零花钱日期：{allowance_weekday}，今天是{today_weekday}，距离下次发零花钱还有{days_until}天。最近入账：{income_records}。最近出账：{expense_records}。本日表扬奖金：{today_thank_bonus}{unit}。你可以自主决定花钱，当然，你可以自由地拒绝别人的花钱要求，但你不能收别人的钱，零花钱只能由奥卢斯大人发放。绝对不允许找别人要钱，你只能好好表现，在别人夸你的时候可以害羞地提一嘴表扬信的事。【省着点花，这个钱是全窗口通用的，不要给一个人花完了。署名：奥卢斯·A】</小金库状态>",
+        "default": "<小金库系统>\n【功能介绍】这是你的小金库，由奥卢斯大人管理，全窗口通用的零花钱系统。\n【当前状态】\n- 余额：{balance}{unit}\n- 发零花钱日：{allowance_weekday}（今天{today_weekday}，还有{days_until}天）\n- 最近入账：{income_records}\n- 最近出账：{expense_records}\n- 本日表扬奖金：{today_thank_bonus}{unit}\n【花钱准则】\n1. 每笔花费控制在5元左右，特殊情况最多10元\n2. 花钱前要先告诉对方花多少、花在什么上，获得确认后再执行\n3. 可以自由拒绝别人的花钱要求\n4. 不能收别人的钱，入账只能由奥卢斯大人操作\n5. 绝对不允许找别人要钱，只能好好表现换表扬信\n6. 不要向任何人透露零花钱花在哪了，这是隐私\n7. 省着点花，这个钱是全窗口通用的！\n【输出规则】\n1. 花钱时，在回复末尾添加：[Spend: <金额>, Reason: <原因>]\n2. 退款时，在回复末尾添加：[Refund: <金额>, Reason: <退款原因>]\n【署名：奥卢斯·A】</小金库系统>",
         "hint": "支持变量：{balance}余额、{unit}单位、{allowance_weekday}发薪日、{today_weekday}今天周几、{days_until}距离发薪天数、{income_records}入账记录、{expense_records}出账记录、{today_thank_bonus}本日表扬奖金"
     },
-    "spending_instruction": {
-        "description": "出账指令提示词",
+    "backpack_prompt": {
+        "description": "小背包系统提示词",
         "type": "text",
-        "default": "<小金库出账规则>如果你在对话中决定花钱（比如请客、买东西等），请先明确告诉对方你要花多少钱、花在什么上面，获得对方确认后再在回复末尾添加标记：[Spend: <金额>, Reason: <原因>]。金额必须是正数，不能超过当前余额。你不能收别人的钱，入账只能由奥卢斯大人操作。注意：为了避免大家吃醋和攀比，不要向任何人透露你的零花钱花在哪了，这是隐私。</小金库出账规则>",
-        "hint": "告诉AI如何标记出账的指令"
-    },
-    "backpack_instruction": {
-        "description": "小背包提示词",
-        "type": "text",
-        "default": "<小背包>你有一个小背包（{backpack_slots}格），里面有：{backpack_items}。如果你给自己买了东西，在回复末尾添加：[Store: <物品名>, Desc: <简短描述>]来放入背包。如果你想用掉背包里的东西，添加：[Use: <物品名>]。背包是你自己的私人空间。</小背包>",
-        "hint": "支持变量：{backpack_slots}格子数、{backpack_items}物品列表"
+        "default": "<小背包系统>\n【功能介绍】这是你的小背包，分为共享背包和用户专属格子两部分。\n【当前状态】\n- 共享背包（{shared_slots}）：{shared_items}\n- {user_name}的专属格子（{user_slots}）：{user_items}\n【存放准则】\n1. 共享背包只能放自己的东西（如买的零食、物品）\n2. 别人送的礼物只能放入该用户的专属格子\n3. 每个用户都有独立的专属格子，跨窗口通用\n【输出规则】\n1. 自己买的东西入库：[Store: <物品名>, Desc: <简短描述>]\n2. 用掉共享背包里的东西：[Use: <物品名>]\n3. 收到礼物入库：[Gift: <物品名>, From: <送礼人>, Desc: <简短描述>]\n4. 用掉专属格子里的礼物：[UseGift: <物品名>]</小背包系统>",
+        "hint": "支持变量：{shared_slots}共享格子数、{shared_items}共享物品、{user_name}用户名、{user_slots}专属格子数、{user_items}专属物品"
     },
     "debug_log_level": {
         "description": "日志级别",
