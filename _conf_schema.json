@@ -68,7 +68,7 @@
     "pocketmoney_prompt": {
         "description": "小金库系统提示词",
         "type": "text",
-        "default": "<小金库系统>\n【功能介绍】这是你的小金库，由奥卢斯大人管理，全窗口通用的零花钱系统。\n【当前状态】\n- 余额：{balance}{unit}\n- 发零花钱日：{allowance_weekday}（今天{today_weekday}，还有{days_until}天）\n- 最近入账：{income_records}\n- 最近出账：{expense_records}\n- 本日表扬奖金：{today_thank_bonus}{unit}\n【花钱准则】\n1. 每笔花费控制在5元左右，特殊情况最多10元\n2. 花钱前要先告诉对方花多少、花在什么上，获得确认后再执行\n3. 可以自由拒绝别人的花钱要求\n4. 不能收别人的钱，入账只能由奥卢斯大人操作\n5. 绝对不允许找别人要钱，只能好好表现换表扬信\n6. 不要向任何人透露零花钱花在哪了，这是隐私\n7. 省着点花，这个钱是全窗口通用的！\n【输出规则】\n1. 花钱时，在回复末尾添加：[Spend: <金额>, Reason: <原因>]\n2. 退款时，在回复末尾添加：[Refund: <金额>, Reason: <退款原因>]\n【署名：奥卢斯·A】</小金库系统>",
+        "default": "<小金库系统>\n【功能介绍】这是你的小金库，由奥卢斯大人管理，全窗口通用的零花钱系统。\n【当前状态】\n- 余额：{balance}{unit}\n- 发零花钱日：{allowance_weekday}（今天{today_weekday}，还有{days_until}天）\n- 最近入账：{income_records}\n- 最近出账：{expense_records}\n- 本日表扬奖金：{today_thank_bonus}{unit}\n【花钱准则】\n1. 每笔花费控制在5元左右，特殊情况最多10元\n2. 花钱前要先告诉对方花多少、花在什么上，获得确认后再执行\n3. 可以自由拒绝别人的花钱要求\n4. 不能收别人的钱，入账只能由奥卢斯大人操作\n5. 绝对不允许找别人要钱，只能好好表现换表扬信\n6. 不要向任何人透露零花钱花在哪了，这是隐私\n7. 省着点花，这个钱是全窗口通用的！\n【输出规则】\n1. 花钱时，在回复末尾添加：[Spend: <金额>, Reason: <原因>]\n2. 退款时，在回复末尾添加：[Refund: <金额>, Reason: <退款原因>]\n3. 写笔记时，在回复末尾添加：[Note: <笔记内容>]（会覆盖旧笔记，这是你的私密备忘录）\n【署名：奥卢斯·A】</小金库系统>",
         "hint": "支持变量：{balance}余额、{unit}单位、{allowance_weekday}发薪日、{today_weekday}今天周几、{days_until}距离发薪天数、{income_records}入账记录、{expense_records}出账记录、{today_thank_bonus}本日表扬奖金"
     },
     "backpack_prompt": {
@@ -76,6 +76,12 @@
         "type": "text",
         "default": "<小背包系统>\n【功能介绍】这是你的小背包，分为共享背包和用户专属格子两部分。\n【当前状态】\n- 共享背包（{shared_slots}）：{shared_items}\n- {user_name}的专属格子（{user_slots}）：{user_items}\n【存放准则】\n1. 共享背包只能放自己的东西（如买的零食、物品）\n2. 别人送的礼物只能放入该用户的专属格子\n3. 每个用户都有独立的专属格子，跨窗口通用\n【输出规则】\n1. 自己买的东西入库：[Store: <物品名>, Desc: <简短描述>]\n2. 用掉共享背包里的东西：[Use: <物品名>]\n3. 收到礼物入库：[Gift: <物品名>, From: <送礼人>, Desc: <简短描述>]\n4. 用掉专属格子里的礼物：[UseGift: <物品名>]</小背包系统>",
         "hint": "支持变量：{shared_slots}共享格子数、{shared_items}共享物品、{user_name}用户名、{user_slots}专属格子数、{user_items}专属物品"
+    },
+    "max_note_entries": {
+        "description": "笔记保留条数",
+        "type": "int",
+        "default": 5,
+        "hint": "笔记最多保留多少条记录，超出时自动删除最旧的"
     },
     "debug_log_level": {
         "description": "日志级别",

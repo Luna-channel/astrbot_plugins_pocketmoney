@@ -11,9 +11,6 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api import logger, AstrBotConfig
 
 
-CURRENCY_UNIT = "元"
-
-
 class ThankLetterManager:
     """
     表扬信管理系统
@@ -231,8 +228,12 @@ class BackpackManager:
         :return: 是否成功
         """
         items = self.data.get("shared_items", [])
+        # 标准化输入名称用于模糊匹配
+        normalized_name = name.strip().lower().replace(" ", "").replace("\u3000", "")
         for i, item in enumerate(items):
-            if item["name"] == name:
+            # 模糊匹配：忽略空格和大小写
+            item_normalized = item["name"].strip().lower().replace(" ", "").replace("\u3000", "")
+            if item_normalized == normalized_name or item["name"] == name:
                 items.pop(i)
                 self._save_data()
                 return True
@@ -290,8 +291,12 @@ class BackpackManager:
         :return: 是否成功
         """
         items = self.data.get("user_slots", {}).get(user_id, [])
+        # 标准化输入名称用于模糊匹配
+        normalized_name = name.strip().lower().replace(" ", "").replace("\u3000", "")
         for i, item in enumerate(items):
-            if item["name"] == name:
+            # 模糊匹配：忽略空格和大小写
+            item_normalized = item["name"].strip().lower().replace(" ", "").replace("\u3000", "")
+            if item_normalized == normalized_name or item["name"] == name:
                 items.pop(i)
                 self._save_data()
                 return True
@@ -323,40 +328,6 @@ class BackpackManager:
             return "空空如也"
         return "、".join([f"{item['name']}(来自{item['from']}: {item['description']})" for item in items])
 
-    # ========== 兼容旧版本的方法别名 ==========
-    
-    def get_items(self) -> List[Dict[str, Any]]:
-        """获取所有物品（兼容旧版本，返回共享背包）"""
-        return self.get_shared_items()
-
-    def get_item_count(self) -> int:
-        """获取物品数量（兼容旧版本，返回共享背包）"""
-        return self.get_shared_item_count()
-
-    def is_full(self) -> bool:
-        """检查背包是否已满（兼容旧版本，检查共享背包）"""
-        return self.is_shared_full()
-
-    def add_item(self, name: str, description: str) -> bool:
-        """添加物品（兼容旧版本，添加到共享背包）"""
-        return self.add_shared_item(name, description)
-
-    def use_item(self, name: str) -> bool:
-        """使用物品（兼容旧版本，从共享背包移除）"""
-        return self.use_shared_item(name)
-
-    def clear_items(self):
-        """清空背包（兼容旧版本，清空共享背包）"""
-        self.clear_shared_items()
-
-    def format_items_for_prompt(self) -> str:
-        """格式化物品列表（兼容旧版本，返回共享背包）"""
-        return self.format_shared_items_for_prompt()
-
-    @property
-    def max_slots(self) -> int:
-        """兼容旧版本的属性"""
-        return self.max_shared_slots
 
 
 class PocketMoneyManager:
@@ -364,7 +335,8 @@ class PocketMoneyManager:
     小金库管理系统
     - 全局余额管理（不区分会话）
     - 入账/出账记录
-    - 数据结构: {"balance": float, "records": [{"type": "income/expense", "amount": float, "reason": str, "time": str, "operator": str}]}
+    - 数据结构: {"balance": float, "records": [...], "note": str}
+    - 笔记功能：贝塔可以自己编辑的备忘录
     """
 
     def __init__(self, data_dir: str, initial_balance: float = 0, max_records: int = 100):
@@ -390,6 +362,8 @@ class PocketMoneyManager:
                     data["balance"] = self.initial_balance
                 if "records" not in data:
                     data["records"] = []
+                if "note" not in data:
+                    data["note"] = ""
                 return data
         except (json.JSONDecodeError, TypeError):
             return {"balance": self.initial_balance, "records": []}
@@ -507,8 +481,100 @@ class PocketMoneyManager:
         self._save_data()
         return True
 
+    # ========== 笔记功能 ==========
+    
+    def get_notes(self) -> list:
+        """获取笔记列表"""
+        notes = self.data.get("notes", [])
+        # 兼容旧版本单字符串格式
+        if not notes and self.data.get("note"):
+            return [self.data.get("note")]
+        return notes
+    
+    def get_note(self) -> str:
+        """获取格式化的笔记内容（用于提示词）"""
+        notes = self.get_notes()
+        if not notes:
+            return ""
+        # 返回格式化的笔记列表
+        return "\n".join([f"{i+1}. {note}" for i, note in enumerate(notes)])
+    
+    def add_note(self, content: str, max_entries: int = 5) -> bool:
+        """
+        添加笔记条目（自动限制数量）
+        :param content: 笔记内容
+        :param max_entries: 最大保留条数
+        :return: 是否成功
+        """
+        content = content.strip()
+        if not content:
+            return False
+        
+        notes = self.data.get("notes", [])
+        # 兼容旧版本：迁移旧的单字符串笔记
+        if not notes and self.data.get("note"):
+            notes = [self.data.get("note")]
+            self.data.pop("note", None)
+        
+        notes.append(content)
+        
+        # 限制数量，删除最旧的
+        if len(notes) > max_entries:
+            notes = notes[-max_entries:]
+        
+        self.data["notes"] = notes
+        self._save_data()
+        return True
+    
+    def set_note(self, content: str, max_entries: int = 5) -> bool:
+        """
+        设置笔记（兼容旧接口，实际调用add_note）
+        """
+        return self.add_note(content, max_entries)
+    
+    def clear_notes(self) -> bool:
+        """清空所有笔记"""
+        self.data["notes"] = []
+        self.data.pop("note", None)  # 清理旧格式
+        self._save_data()
+        return True
+    
+    def clear_note(self) -> bool:
+        """清空笔记（兼容旧接口）"""
+        return self.clear_notes()
+    
+    def delete_note(self, index: int) -> bool:
+        """
+        删除指定索引的笔记条目（1-indexed）
+        :param index: 笔记序号（从1开始）
+        :return: 是否成功
+        """
+        notes = self.get_notes()
+        if not notes:
+            return False
+        
+        # 转换为0-indexed
+        idx = index - 1
+        if idx < 0 or idx >= len(notes):
+            return False
+        
+        # 确保 notes 是列表格式
+        if "notes" not in self.data:
+            self.data["notes"] = notes
+        
+        self.data["notes"].pop(idx)
+        self._save_data()
+        return True
 
-@register("astrbot_plugin_pocketmoney", "柯尔", "贝塔的小金库系统，管理余额和收支记录", "1.0.0")
+
+@register("astrbot_plugin_pocketmoney", "柯尔", "贝塔的小金库系统，管理余额和收支记录", "1.4.0")
+# ==================== 版本历史 ====================
+# v1.0 - 基础零花钱：余额管理、入账/出账、记录查询
+# v1.1 - 表扬信/投诉信系统：每日限制、排行榜、随机奖金 
+# v1.2 - 背包系统：共享背包、物品入库/使用
+# v1.3 - 专属背包格子：每个用户独立的礼物存储空间
+# v1.4 - 笔记功能：AI私密备忘录，管理员可查看/追加
+# ==================================================
 class PocketMoneyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -550,12 +616,12 @@ class PocketMoneyPlugin(Star):
         self.store_name_pattern = re.compile(r"(?:Store|入库|收纳)\s*[:：]\s*(.+?)(?=\s*[,，])")
         self.store_desc_pattern = re.compile(r"(?:Desc|描述|说明)\s*[:：]\s*(.+?)(?=\s*\])")
         
-        # 匹配背包使用标记: [Use: 物品名]
+        # 匹配背包使用标记: [Use: 物品名] - 排除UseGift
         self.use_pattern = re.compile(
-            r"\s*\[(?=[^\]]*(?:Use|使用|用掉))[^\]]*\]\s*",
+            r"\s*\[(?=[^\]]*(?:(?<!e)Use(?!Gift)|使用(?!礼物)|用掉))[^\]]*\]\s*",
             re.IGNORECASE | re.DOTALL
         )
-        self.use_name_pattern = re.compile(r"(?:Use|使用|用掉)\s*[:：]\s*(.+?)(?=\s*\])")
+        self.use_name_pattern = re.compile(r"(?<!e)(?:Use)(?!Gift)\s*[:：]\s*(.+?)(?=\s*\])|(?:使用)(?!礼物)\s*[:：]\s*(.+?)(?=\s*\])|(?:用掉)\s*[:：]\s*(.+?)(?=\s*\])", re.IGNORECASE)
         
         # 匹配礼物入库标记: [Gift: 物品名, From: 送礼人, Desc: 描述]
         self.gift_pattern = re.compile(
@@ -581,6 +647,13 @@ class PocketMoneyPlugin(Star):
         self.refund_amount_pattern = re.compile(r"(?:Refund|退款|退钱)\s*[:：]\s*(\d+(?:\.\d+)?)")
         self.refund_reason_pattern = re.compile(r"(?:Reason|原因|理由)\s*[:：]\s*(.+?)(?=\s*[,，\]]|\])")
         
+        # 匹配笔记标记: [Note: 内容] 或 [笔记: 内容]
+        self.note_pattern = re.compile(
+            r"\s*\[(?=[^\]]*(?:Note|笔记|备忘|记录))[^\]]*\]\s*",
+            re.IGNORECASE | re.DOTALL
+        )
+        self.note_content_pattern = re.compile(r"(?:Note|笔记|备忘|记录)\s*[:：]\s*(.+?)(?=\s*\])")
+        
         # 防重复扣费：记录已处理的消息ID
         self.processed_message_ids = set()
 
@@ -593,9 +666,9 @@ class PocketMoneyPlugin(Star):
         for r in records:
             if show_type:
                 type_str = "+" if r["type"] == "income" else "-"
-                lines.append(f"{r['time']}: {type_str}{r['amount']}{CURRENCY_UNIT} ({r['reason']})")
+                lines.append(f"{r['time']}: {type_str}{r['amount']}元 ({r['reason']})")
             else:
-                lines.append(f"{r['time']}: {r['amount']}{CURRENCY_UNIT} ({r['reason']})")
+                lines.append(f"{r['time']}: {r['amount']}元 ({r['reason']})")
         return "; ".join(lines)
 
     def _get_weekday_info(self) -> tuple:
@@ -640,6 +713,9 @@ class PocketMoneyPlugin(Star):
         # 获取今日表扬奖金
         today_thank_bonus = self.thank_manager.get_today_bonus()
         
+        # 获取小金库笔记
+        note = self.manager.get_note()
+        
         # 获取当前用户ID
         current_user_id = event.get_sender_id()
         current_user_name = event.get_sender_name() or current_user_id
@@ -673,11 +749,15 @@ class PocketMoneyPlugin(Star):
             "【输出规则】\n"
             "1. 花钱时，在回复末尾添加：[Spend: <金额>, Reason: <原因>]\n"
             "2. 退款时，在回复末尾添加：[Refund: <金额>, Reason: <退款原因>]\n"
+            "3. 写笔记时，在回复末尾添加：[Note: <笔记内容>]（会追加到笔记列表，这是你的私密备忘录）\n"
             "【署名：奥卢斯·A】</小金库系统>")
+        
+        # 添加笔记到提示词（插入到 </小金库系统> 标签之前）
+        note_str = f"\n【我的笔记】{note}" if note else ""
         
         pocketmoney_prompt = pocketmoney_template.format(
             balance=balance,
-            unit=CURRENCY_UNIT,
+            unit="元",
             allowance_weekday=allowance_weekday,
             today_weekday=today_weekday,
             days_until=days_until,
@@ -685,6 +765,10 @@ class PocketMoneyPlugin(Star):
             expense_records=expense_str,
             today_thank_bonus=today_thank_bonus
         )
+        
+        # 将笔记插入到 </小金库系统> 标签之前
+        if note_str and "</小金库系统>" in pocketmoney_prompt:
+            pocketmoney_prompt = pocketmoney_prompt.replace("</小金库系统>", f"{note_str}\n</小金库系统>")
         
         # 构建小背包系统提示词
         backpack_template = self.config.get("backpack_prompt",
@@ -714,7 +798,7 @@ class PocketMoneyPlugin(Star):
         req.system_prompt += f"\n{pocketmoney_prompt}"
         req.system_prompt += f"\n{backpack_prompt}"
         
-        logger.debug(f"[PocketMoney] 注入上下文 - 余额: {balance}{CURRENCY_UNIT}, 今天: {today_weekday}, 共享背包: {shared_slots}, 用户专属: {user_slots}")
+        logger.debug(f"[PocketMoney] 注入上下文 - 余额: {balance}元, 今天: {today_weekday}, 共享背包: {shared_slots}, 用户专属: {user_slots}")
 
     @filter.on_llm_response()
     async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -724,6 +808,21 @@ class PocketMoneyPlugin(Star):
 
         logger.debug("[PocketMoney] on_llm_resp 被调用")
         logger.debug(f"[PocketMoney] 原始文本长度: {len(original_text)}")
+        
+        # 防重复处理：使用消息ID + 响应文本哈希作为唯一标识
+        message_id = getattr(event, 'message_id', None) or id(event)
+        response_hash = hash(original_text[:100]) if original_text else 0
+        unique_key = f"{message_id}_{response_hash}"
+        
+        if unique_key in self.processed_message_ids:
+            logger.debug(f"[PocketMoney] 跳过重复处理: {unique_key}")
+            return
+        
+        self.processed_message_ids.add(unique_key)
+        # 限制缓存大小，避免内存泄漏
+        if len(self.processed_message_ids) > 1000:
+            # 清理一半的旧记录
+            self.processed_message_ids = set(list(self.processed_message_ids)[-500:])
 
         # 处理出账标记
         spend_matches = list(self.spend_pattern.finditer(cleaned_text))
@@ -767,30 +866,53 @@ class PocketMoneyPlugin(Star):
                 item_name = name_match.group(1).strip()
                 item_desc = desc_match.group(1).strip() if desc_match else "无描述"
                 
-                if self.backpack_manager.add_item(item_name, item_desc):
+                if self.backpack_manager.add_shared_item(item_name, item_desc):
                     logger.info(f"[PocketMoney] 入库成功: {item_name} - {item_desc}")
                 else:
                     logger.warning(f"[PocketMoney] 入库失败（背包已满）: {item_name}")
 
-        # 处理共享背包使用标记
+        # 获取当前用户ID用于礼物操作
+        current_user_id = event.get_sender_id()
+        current_user_name = event.get_sender_name() or current_user_id
+
+        # 【重要】先处理UseGift，再处理Use，避免Use误匹配UseGift
+        # 处理使用专属格子礼物标记: [UseGift: 物品名]
+        use_gift_matches = list(self.use_gift_pattern.finditer(cleaned_text))
+        if use_gift_matches:
+            logger.debug(f"[PocketMoney] 找到 {len(use_gift_matches)} 个使用礼物标记")
+            cleaned_text = self.use_gift_pattern.sub('', cleaned_text).strip()
+            
+            # 处理所有匹配的使用礼物标记
+            for use_gift_block_match in use_gift_matches:
+                use_gift_block = use_gift_block_match.group(0)
+                use_gift_name_match = self.use_gift_name_pattern.search(use_gift_block)
+                
+                if use_gift_name_match:
+                    gift_name = use_gift_name_match.group(1).strip()
+                    if self.backpack_manager.use_user_item(current_user_id, gift_name):
+                        logger.info(f"[PocketMoney] 使用礼物成功: {gift_name} (用户{current_user_id})")
+                    else:
+                        logger.warning(f"[PocketMoney] 使用礼物失败（物品不存在）: {gift_name}")
+
+        # 处理共享背包使用标记: [Use: 物品名] - 在UseGift之后处理，避免误匹配
         use_matches = list(self.use_pattern.finditer(cleaned_text))
         if use_matches:
             logger.debug(f"[PocketMoney] 找到 {len(use_matches)} 个共享背包使用标记")
             cleaned_text = self.use_pattern.sub('', cleaned_text).strip()
             
-            use_block = use_matches[-1].group(0)
-            use_name_match = self.use_name_pattern.search(use_block)
-            
-            if use_name_match:
-                item_name = use_name_match.group(1).strip()
-                if self.backpack_manager.use_shared_item(item_name):
-                    logger.info(f"[PocketMoney] 共享背包使用成功: {item_name}")
-                else:
-                    logger.warning(f"[PocketMoney] 共享背包使用失败（物品不存在）: {item_name}")
-
-        # 获取当前用户ID用于礼物操作
-        current_user_id = event.get_sender_id()
-        current_user_name = event.get_sender_name() or current_user_id
+            # 处理所有匹配的使用标记
+            for use_block_match in use_matches:
+                use_block = use_block_match.group(0)
+                use_name_match = self.use_name_pattern.search(use_block)
+                
+                if use_name_match:
+                    # 多分组处理：获取第一个非空的分组
+                    item_name = next((g.strip() for g in use_name_match.groups() if g), None)
+                    if item_name:
+                        if self.backpack_manager.use_shared_item(item_name):
+                            logger.info(f"[PocketMoney] 共享背包使用成功: {item_name}")
+                        else:
+                            logger.warning(f"[PocketMoney] 共享背包使用失败（物品不存在）: {item_name}")
 
         # 处理礼物入库标记: [Gift: 物品名, From: 送礼人, Desc: 描述]
         gift_matches = list(self.gift_pattern.finditer(cleaned_text))
@@ -798,36 +920,22 @@ class PocketMoneyPlugin(Star):
             logger.debug(f"[PocketMoney] 找到 {len(gift_matches)} 个礼物入库标记")
             cleaned_text = self.gift_pattern.sub('', cleaned_text).strip()
             
-            gift_block = gift_matches[-1].group(0)
-            gift_name_match = self.gift_name_pattern.search(gift_block)
-            gift_from_match = self.gift_from_pattern.search(gift_block)
-            gift_desc_match = self.gift_desc_pattern.search(gift_block)
-            
-            if gift_name_match:
-                gift_name = gift_name_match.group(1).strip()
-                gift_from = gift_from_match.group(1).strip() if gift_from_match else current_user_name
-                gift_desc = gift_desc_match.group(1).strip() if gift_desc_match else "无描述"
+            # 处理所有匹配的礼物入库标记
+            for gift_block_match in gift_matches:
+                gift_block = gift_block_match.group(0)
+                gift_name_match = self.gift_name_pattern.search(gift_block)
+                gift_from_match = self.gift_from_pattern.search(gift_block)
+                gift_desc_match = self.gift_desc_pattern.search(gift_block)
                 
-                if self.backpack_manager.add_user_gift(current_user_id, gift_name, gift_desc, gift_from):
-                    logger.info(f"[PocketMoney] 礼物入库成功: {gift_name} (来自{gift_from}) -> 用户{current_user_id}")
-                else:
-                    logger.warning(f"[PocketMoney] 礼物入库失败（专属格子已满）: {gift_name}")
-
-        # 处理使用专属格子礼物标记: [UseGift: 物品名]
-        use_gift_matches = list(self.use_gift_pattern.finditer(cleaned_text))
-        if use_gift_matches:
-            logger.debug(f"[PocketMoney] 找到 {len(use_gift_matches)} 个使用礼物标记")
-            cleaned_text = self.use_gift_pattern.sub('', cleaned_text).strip()
-            
-            use_gift_block = use_gift_matches[-1].group(0)
-            use_gift_name_match = self.use_gift_name_pattern.search(use_gift_block)
-            
-            if use_gift_name_match:
-                gift_name = use_gift_name_match.group(1).strip()
-                if self.backpack_manager.use_user_item(current_user_id, gift_name):
-                    logger.info(f"[PocketMoney] 使用礼物成功: {gift_name} (用户{current_user_id})")
-                else:
-                    logger.warning(f"[PocketMoney] 使用礼物失败（物品不存在）: {gift_name}")
+                if gift_name_match:
+                    gift_name = gift_name_match.group(1).strip()
+                    gift_from = gift_from_match.group(1).strip() if gift_from_match else current_user_name
+                    gift_desc = gift_desc_match.group(1).strip() if gift_desc_match else "无描述"
+                    
+                    if self.backpack_manager.add_user_gift(current_user_id, gift_name, gift_desc, gift_from):
+                        logger.info(f"[PocketMoney] 礼物入库成功: {gift_name} (来自{gift_from}) -> 用户{current_user_id}")
+                    else:
+                        logger.warning(f"[PocketMoney] 礼物入库失败（专属格子已满）: {gift_name}")
 
         # 处理退款标记: [Refund: 金额, Reason: 原因]
         refund_matches = list(self.refund_pattern.finditer(cleaned_text))
@@ -853,6 +961,25 @@ class PocketMoneyPlugin(Star):
                         logger.warning(f"[PocketMoney] 退款金额无效: {refund_amount}")
                 except ValueError:
                     logger.warning("[PocketMoney] 退款金额解析失败")
+
+        # 处理笔记标记: [Note: 内容] - AI专用
+        # 【已禁用】小贝自己修改笔记的功能，改由管理员手动追加
+        note_matches = list(self.note_pattern.finditer(cleaned_text))
+        if note_matches:
+            logger.debug(f"[PocketMoney] 找到 {len(note_matches)} 个笔记标记（已禁用自动追加）")
+            cleaned_text = self.note_pattern.sub('', cleaned_text).strip()
+            
+            # # 处理所有匹配的笔记标记（已注释 - 由管理员手动追加）
+            # for note_block_match in note_matches:
+            #     note_block = note_block_match.group(0)
+            #     note_content_match = self.note_content_pattern.search(note_block)
+            #     
+            #     if note_content_match:
+            #         note_content = note_content_match.group(1).strip()
+            #         if note_content:
+            #             max_entries = self.config.get("max_note_entries", 5)
+            #             self.manager.set_note(note_content, max_entries)
+            #             logger.info(f"[PocketMoney] 笔记已更新: {note_content}")
 
         # 更新响应文本
         resp.completion_text = cleaned_text
@@ -880,13 +1007,12 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result("错误：金额格式不正确。")
             return
 
-        unit = CURRENCY_UNIT
         operator = f"奥卢斯大人({event.get_sender_id()})"
         success = self.manager.add_income(amount_value, reason, operator)
         
         if success:
             new_balance = self.manager.get_balance()
-            yield event.plain_result(f"入账成功！+{amount_value}{unit}\n原因：{reason}\n当前余额：{new_balance}{unit}")
+            yield event.plain_result(f"入账成功！+{amount_value}元\n原因：{reason}\n当前余额：{new_balance}元")
         else:
             yield event.plain_result("入账失败，请检查金额。")
 
@@ -907,11 +1033,10 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result("错误：金额格式不正确。")
             return
 
-        unit = CURRENCY_UNIT
         current_balance = self.manager.get_balance()
         
         if amount_value > current_balance:
-            yield event.plain_result(f"错误：余额不足。当前余额：{current_balance}{unit}")
+            yield event.plain_result(f"错误：余额不足。当前余额：{current_balance}元")
             return
 
         operator = f"奥卢斯大人({event.get_sender_id()})"
@@ -919,7 +1044,7 @@ class PocketMoneyPlugin(Star):
         
         if success:
             new_balance = self.manager.get_balance()
-            yield event.plain_result(f"扣款成功！-{amount_value}{unit}\n原因：{reason}\n当前余额：{new_balance}{unit}")
+            yield event.plain_result(f"扣款成功！-{amount_value}元\n原因：{reason}\n当前余额：{new_balance}元")
         else:
             yield event.plain_result("扣款失败。")
 
@@ -940,14 +1065,13 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result("错误：金额格式不正确。")
             return
 
-        unit = CURRENCY_UNIT
         old_balance = self.manager.get_balance()
         operator = f"奥卢斯大人({event.get_sender_id()})"
         
         success = self.manager.set_balance(amount_value, reason, operator)
         
         if success:
-            yield event.plain_result(f"余额已调整！\n{old_balance}{unit} → {amount_value}{unit}\n原因：{reason}")
+            yield event.plain_result(f"余额已调整！\n{old_balance}元 → {amount_value}元\n原因：{reason}")
         else:
             yield event.plain_result("设置失败。")
 
@@ -966,18 +1090,17 @@ class PocketMoneyPlugin(Star):
         except ValueError:
             count = 5
 
-        unit = CURRENCY_UNIT
         balance = self.manager.get_balance()
         recent_records = self.manager.get_recent_records(count)
         
-        response = f"💰 小金库余额：{balance}{unit}\n\n📋 最近{count}条记录：\n"
+        response = f"💰 小金库余额：{balance}元\n\n📋 最近{count}条记录：\n"
         
         if not recent_records:
             response += "暂无记录"
         else:
             for i, r in enumerate(reversed(recent_records), 1):
                 type_str = "📈 入账" if r["type"] == "income" else "📉 出账"
-                response += f"{i}. {type_str} {r['amount']}{unit}\n"
+                response += f"{i}. {type_str} {r['amount']}元\n"
                 response += f"   时间：{r['time']}\n"
                 response += f"   原因：{r['reason']}\n"
                 response += f"   操作：{r['operator']}\n"
@@ -1000,7 +1123,6 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result("错误：数量必须是正整数。")
             return
 
-        unit = CURRENCY_UNIT
         all_records = self.manager.get_all_records()
         
         if not all_records:
@@ -1017,14 +1139,14 @@ class PocketMoneyPlugin(Star):
         
         for r in reversed(records_to_show):
             type_str = "+" if r["type"] == "income" else "-"
-            response += f"{r['time']} | {type_str}{r['amount']}{unit} | {r['reason']} | {r['operator']}\n"
+            response += f"{r['time']} | {type_str}{r['amount']}元 | {r['reason']} | {r['operator']}\n"
             
             if r["type"] == "income":
                 total_income += r["amount"]
             else:
                 total_expense += r["amount"]
         
-        response += f"\n📊 统计：入账 +{total_income}{unit}，出账 -{total_expense}{unit}"
+        response += f"\n📊 统计：入账 +{total_income}元，出账 -{total_expense}元"
         
         yield event.plain_result(response)
 
@@ -1091,9 +1213,9 @@ class PocketMoneyPlugin(Star):
         
         yield event.plain_result(
             f"收到 {sender_name} 的表扬信！\n"
-            f"💌 获得表扬奖金：+{amount}{CURRENCY_UNIT}\n"
-            f"📊 本日表扬奖金：{today_bonus}{CURRENCY_UNIT}\n"
-            f"💰 当前余额：{new_balance}{CURRENCY_UNIT}"
+            f"� 获得表扬奖金：+{amount}元\n"
+            f"📊 本日表扬奖金：{today_bonus}元\n"
+            f"💰 当前余额：{new_balance}元"
         )
 
     @filter.command("发投诉信")
@@ -1170,7 +1292,7 @@ class PocketMoneyPlugin(Star):
             response += f"{medal} {name}：{count} 封\n"
         
         total_bonus = self.thank_manager.get_total_bonus()
-        response += f"\n📊 累计表扬奖金：{total_bonus}{CURRENCY_UNIT}"
+        response += f"\n📊 累计表扬奖金：{total_bonus}元"
         
         yield event.plain_result(response)
 
@@ -1181,8 +1303,8 @@ class PocketMoneyPlugin(Star):
         total_bonus = self.thank_manager.get_total_bonus()
         
         yield event.plain_result(
-            f"💌 本日表扬奖金：{today_bonus}{CURRENCY_UNIT}\n"
-            f"📊 累计表扬奖金：{total_bonus}{CURRENCY_UNIT}"
+            f"💌 本日表扬奖金：{today_bonus}元\n"
+            f"📊 累计表扬奖金：{total_bonus}元"
         )
 
     # ------------------- 小背包命令 -------------------
@@ -1336,6 +1458,90 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result(f"已从用户 {user_id} 的专属格子移除：{item_name}")
         else:
             yield event.plain_result(f"用户 {user_id} 的专属格子中没有找到：{item_name}")
+
+    # ------------------- 小金库笔记命令（仅管理员可用） -------------------
+
+    @filter.command("追加笔记")
+    async def append_note(self, event: AstrMessageEvent, *, content: str = ""):
+        """(管理员) 追加内容到小金库笔记"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能操作笔记"))
+            return
+        
+        if not content.strip():
+            yield event.plain_result("请输入要追加的内容，例如：追加笔记 记得还小明5块钱")
+            return
+        
+        max_entries = self.config.get("max_note_entries", 5)
+        self.manager.add_note(content.strip(), max_entries)
+        current_note = self.manager.get_note()
+        yield event.plain_result(f"📝 笔记已追加，当前完整笔记：\n{current_note}")
+
+    @filter.command("查看笔记")
+    async def view_note(self, event: AstrMessageEvent):
+        """(管理员) 查看小金库笔记"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "这是贝塔的私密笔记，只有奥卢斯大人能看"))
+            return
+        
+        note = self.manager.get_note()
+        if note:
+            yield event.plain_result(f"📝 小金库笔记：\n{note}")
+        else:
+            yield event.plain_result("📝 小金库笔记为空")
+
+    @filter.command("删除笔记")
+    async def delete_note(self, event: AstrMessageEvent, index: str = ""):
+        """(管理员) 删除指定序号的笔记"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能操作笔记"))
+            return
+        
+        if not index.strip():
+            yield event.plain_result("请指定要删除的笔记序号，例如：删除笔记 1")
+            return
+        
+        try:
+            note_index = int(index.strip())
+            if note_index <= 0:
+                yield event.plain_result("错误：序号必须是正整数")
+                return
+        except ValueError:
+            yield event.plain_result("错误：请输入有效的序号数字")
+            return
+        
+        notes = self.manager.get_notes()
+        if not notes:
+            yield event.plain_result("📝 当前没有笔记可删除")
+            return
+        
+        if note_index > len(notes):
+            yield event.plain_result(f"错误：序号超出范围，当前共有 {len(notes)} 条笔记")
+            return
+        
+        deleted_content = notes[note_index - 1]
+        if self.manager.delete_note(note_index):
+            current_note = self.manager.get_note()
+            if current_note:
+                yield event.plain_result(f"📝 已删除第 {note_index} 条笔记：{deleted_content}\n\n当前笔记：\n{current_note}")
+            else:
+                yield event.plain_result(f"📝 已删除第 {note_index} 条笔记：{deleted_content}\n\n笔记已清空")
+        else:
+            yield event.plain_result("删除失败，请检查序号是否正确")
+
+    @filter.command("清空笔记")
+    async def clear_note(self, event: AstrMessageEvent):
+        """(管理员) 清空小金库笔记"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能清空笔记"))
+            return
+        
+        self.manager.clear_note()
+        yield event.plain_result("📝 小金库笔记已全部清空")
 
     async def terminate(self):
         """插件终止时保存数据"""
