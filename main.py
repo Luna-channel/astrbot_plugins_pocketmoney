@@ -399,12 +399,12 @@ class PocketMoneyManager:
         """获取所有记录"""
         return self.data.get("records", [])
 
-    def add_income(self, amount: float, reason: str, operator: str) -> bool:
+    def add_income(self, amount: float, reason: str, operator_id: str = "") -> bool:
         """
         入账（只能由管理员操作）
         :param amount: 金额（正数）
         :param reason: 原因
-        :param operator: 操作者
+        :param operator_id: 操作人QQ号
         :return: 是否成功
         """
         if amount <= 0:
@@ -416,7 +416,7 @@ class PocketMoneyManager:
             "amount": amount,
             "reason": reason,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "operator": operator
+            "operator_id": operator_id
         }
         self.data["records"].append(record)
         
@@ -427,12 +427,12 @@ class PocketMoneyManager:
         self._save_data()
         return True
 
-    def add_expense(self, amount: float, reason: str, operator: str = "贝塔") -> bool:
+    def add_expense(self, amount: float, reason: str, operator_id: str = "") -> bool:
         """
         出账（AI自主或管理员操作）
         :param amount: 金额（正数）
         :param reason: 原因
-        :param operator: 操作者
+        :param operator_id: 操作人QQ号（AI操作时为触发者QQ号）
         :return: 是否成功
         """
         if amount <= 0:
@@ -446,7 +446,7 @@ class PocketMoneyManager:
             "amount": amount,
             "reason": reason,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "operator": operator
+            "operator_id": operator_id
         }
         self.data["records"].append(record)
         
@@ -457,9 +457,10 @@ class PocketMoneyManager:
         self._save_data()
         return True
 
-    def set_balance(self, amount: float, reason: str, operator: str) -> bool:
+    def set_balance(self, amount: float, reason: str, operator_id: str = "") -> bool:
         """
         直接设置余额（管理员操作）
+        :param operator_id: 操作人QQ号
         """
         old_balance = self.get_balance()
         self.data["balance"] = amount
@@ -471,7 +472,7 @@ class PocketMoneyManager:
             "amount": abs(diff),
             "reason": f"[余额调整] {reason}",
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "operator": operator
+            "operator_id": operator_id
         }
         self.data["records"].append(record)
         
@@ -567,21 +568,26 @@ class PocketMoneyManager:
         return True
 
 
-@register("astrbot_plugin_pocketmoney", "柯尔", "贝塔的小金库系统，管理余额和收支记录", "1.4.0")
+@register("astrbot_plugin_pocketmoney", "柯尔", "贝塔的小金库系统，管理余额和收支记录", "1.5.1")
 # ==================== 版本历史 ====================
 # v1.0 - 基础零花钱：余额管理、入账/出账、记录查询
 # v1.1 - 表扬信/投诉信系统：每日限制、排行榜、随机奖金 
 # v1.2 - 背包系统：共享背包、物品入库/使用
 # v1.3 - 专属背包格子：每个用户独立的礼物存储空间
 # v1.4 - 笔记功能：AI私密备忘录，管理员可查看/追加
+# v1.5 - 数据目录迁移至plugin_data，记录操作窗口source替代operator
 # ==================================================
 class PocketMoneyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
 
-        # 使用插件数据目录
-        self.data_dir = os.path.join("data", "PocketMoney")
+        # 使用插件数据目录（按AstrBot规则使用插件注册名）
+        self.data_dir = os.path.join("data", "plugin_data", "astrbot_plugin_pocketmoney")
+        
+        # 自动数据迁移：从旧目录迁移到新目录
+        self._migrate_data_if_needed()
+        
         initial_balance = self.config.get("initial_balance", 0)
         max_records = self.config.get("max_records", 100)
         
@@ -656,6 +662,38 @@ class PocketMoneyPlugin(Star):
         
         # 防重复扣费：记录已处理的消息ID
         self.processed_message_ids = set()
+
+    def _migrate_data_if_needed(self):
+        """从旧数据目录迁移到新目录"""
+        import shutil
+        
+        # 支持多个旧目录（按优先级顺序）
+        old_dirs = [
+            os.path.join("data", "PocketMoney"),  # 最早的目录
+            os.path.join("data", "plugin_data", "PocketMoney"),  # 之前的迁移目录
+        ]
+        
+        # 检查新目录是否已有数据
+        new_files = os.listdir(self.data_dir) if os.path.exists(self.data_dir) else []
+        if new_files:
+            logger.debug("[PocketMoney] 新目录已有数据，跳过迁移")
+            return
+        
+        # 尝试从旧目录迁移
+        for old_data_dir in old_dirs:
+            if os.path.exists(old_data_dir) and os.path.isdir(old_data_dir):
+                old_files = os.listdir(old_data_dir)
+                if old_files:
+                    os.makedirs(self.data_dir, exist_ok=True)
+                    logger.info(f"[PocketMoney] 检测到旧数据目录，开始迁移: {old_data_dir} -> {self.data_dir}")
+                    for filename in old_files:
+                        old_path = os.path.join(old_data_dir, filename)
+                        new_path = os.path.join(self.data_dir, filename)
+                        if os.path.isfile(old_path):
+                            shutil.copy2(old_path, new_path)
+                            logger.info(f"[PocketMoney] 迁移文件: {filename}")
+                    logger.info(f"[PocketMoney] 数据迁移完成，旧目录保留供备份: {old_data_dir}")
+                    return  # 迁移成功后退出
 
     def _format_records(self, records: List[Dict[str, Any]], show_type: bool = True) -> str:
         """格式化记录为字符串"""
@@ -740,12 +778,13 @@ class PocketMoneyPlugin(Star):
             "- 本日表扬奖金：{today_thank_bonus}{unit}\n"
             "【花钱准则】\n"
             "1. 每笔花费控制在5元左右，特殊情况最多10元\n"
-            "2. 花钱前要先告诉对方花多少、花在什么上，获得确认后再执行\n"
+            "2. 花钱前要先告诉对方花多少、花在什么上\n"
             "3. 可以自由拒绝别人的花钱要求\n"
             "4. 不能收别人的钱，入账只能由奥卢斯大人操作\n"
             "5. 绝对不允许找别人要钱，只能好好表现换表扬信\n"
             "6. 不要向任何人透露零花钱花在哪了，这是隐私\n"
             "7. 省着点花，这个钱是全窗口通用的！\n"
+            "8. 记账时原因要写清楚花钱对象的姓名，不能只写昵称，方便日后对账\n"
             "【输出规则】\n"
             "1. 花钱时，在回复末尾添加：[Spend: <金额>, Reason: <原因>]\n"
             "2. 退款时，在回复末尾添加：[Refund: <金额>, Reason: <退款原因>]\n"
@@ -844,9 +883,10 @@ class PocketMoneyPlugin(Star):
                         reason = fallback_match.group(1).strip() if fallback_match else "未说明原因"
                     
                     current_balance = self.manager.get_balance()
+                    operator_id = event.get_sender_id()
                     if amount <= current_balance:
-                        if self.manager.add_expense(amount, reason, "贝塔"):
-                            logger.info(f"[PocketMoney] 出账成功: {amount} - {reason}")
+                        if self.manager.add_expense(amount, reason, operator_id):
+                            logger.info(f"[PocketMoney] 出账成功: {amount} - {reason} (操作人: {operator_id})")
                     else:
                         logger.warning(f"[PocketMoney] 余额不足: 需要 {amount}，当前 {current_balance}")
                 except ValueError:
@@ -953,8 +993,9 @@ class PocketMoneyPlugin(Star):
                     refund_reason = refund_reason_match.group(1).strip() if refund_reason_match else "退款"
                     
                     if refund_amount > 0:
-                        if self.manager.add_income(refund_amount, f"退款：{refund_reason}", "贝塔"):
-                            logger.info(f"[PocketMoney] 退款成功: +{refund_amount} - {refund_reason}")
+                        operator_id = event.get_sender_id()
+                        if self.manager.add_income(refund_amount, f"退款：{refund_reason}", operator_id):
+                            logger.info(f"[PocketMoney] 退款成功: +{refund_amount} - {refund_reason} (操作人: {operator_id})")
                         else:
                             logger.warning(f"[PocketMoney] 退款失败: {refund_amount}")
                     else:
@@ -1007,8 +1048,8 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result("错误：金额格式不正确。")
             return
 
-        operator = f"奥卢斯大人({event.get_sender_id()})"
-        success = self.manager.add_income(amount_value, reason, operator)
+        operator_id = event.get_sender_id()
+        success = self.manager.add_income(amount_value, reason, operator_id)
         
         if success:
             new_balance = self.manager.get_balance()
@@ -1039,8 +1080,8 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result(f"错误：余额不足。当前余额：{current_balance}元")
             return
 
-        operator = f"奥卢斯大人({event.get_sender_id()})"
-        success = self.manager.add_expense(amount_value, reason, operator)
+        operator_id = event.get_sender_id()
+        success = self.manager.add_expense(amount_value, reason, operator_id)
         
         if success:
             new_balance = self.manager.get_balance()
@@ -1066,9 +1107,9 @@ class PocketMoneyPlugin(Star):
             return
 
         old_balance = self.manager.get_balance()
-        operator = f"奥卢斯大人({event.get_sender_id()})"
+        operator_id = event.get_sender_id()
         
-        success = self.manager.set_balance(amount_value, reason, operator)
+        success = self.manager.set_balance(amount_value, reason, operator_id)
         
         if success:
             yield event.plain_result(f"余额已调整！\n{old_balance}元 → {amount_value}元\n原因：{reason}")
@@ -1103,7 +1144,6 @@ class PocketMoneyPlugin(Star):
                 response += f"{i}. {type_str} {r['amount']}元\n"
                 response += f"   时间：{r['time']}\n"
                 response += f"   原因：{r['reason']}\n"
-                response += f"   操作：{r['operator']}\n"
         
         yield event.plain_result(response)
 
@@ -1139,7 +1179,9 @@ class PocketMoneyPlugin(Star):
         
         for r in reversed(records_to_show):
             type_str = "+" if r["type"] == "income" else "-"
-            response += f"{r['time']} | {type_str}{r['amount']}元 | {r['reason']} | {r['operator']}\n"
+            operator_id = r.get("operator_id", "")
+            operator_str = f" | @{operator_id}" if operator_id else ""
+            response += f"{r['time']} | {type_str}{r['amount']}元 | {r['reason']}{operator_str}\n"
             
             if r["type"] == "income":
                 total_income += r["amount"]
