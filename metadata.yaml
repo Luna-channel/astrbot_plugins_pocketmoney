@@ -2,6 +2,6 @@ name: astrbot_plugin_pocketmoney
 display_name: 小贝的钱包
 desc: 贝塔的小金库系统，管理余额和收支记录，支持AI自主出账。
 help: 管理员指令：发零花钱、查账、查流水
-version: v1.0.0
+version: v1.5.1
 author: 柯尔
 repo: 

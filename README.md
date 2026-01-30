@@ -11,6 +11,7 @@
 | v1.2 | 背包系统：共享背包、物品入库/使用 |
 | v1.3 | 专属背包格子：每个用户独立的礼物存储空间 |
 | v1.4 | 笔记功能：AI私密备忘录，管理员可查看/追加 |
+| v1.5 | 数据目录迁移至plugin_data，记录操作窗口source替代operator |
 
 ## 功能特点
 
@@ -125,7 +126,7 @@
 
 ## 数据存储
 
-插件数据存储在 `data/PocketMoney/` 目录下：
+插件数据存储在 `data/plugin_data/astrbot_plugin_pocketmoney/` 目录下：
 - `pocket_money.json` - 余额、交易记录和笔记
 - `thank_letters.json` - 表扬信数据和排行榜
 - `backpack.json` - 小背包物品
