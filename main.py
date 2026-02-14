@@ -144,6 +144,88 @@ class ThankLetterManager:
         return sorted_ranking[:top_n]
 
 
+class RedEnvelopeManager:
+    """
+    压岁钱管理系统
+    - 每人只能发一次压岁钱
+    - 金额由接收者决定，上限200元
+    - 压岁钱直接存入小金库
+    - 数据结构: {"senders": {"user_id": {"name": str, "time": str}}, "total": float}
+    """
+
+    def __init__(self, data_dir: str, max_amount: float = 200):
+        self.data_dir = data_dir
+        self.max_amount = max_amount
+        self._init_path()
+        self.data = self._load_data()
+
+    def _init_path(self):
+        """初始化数据目录"""
+        os.makedirs(self.data_dir, exist_ok=True)
+
+    def _load_data(self) -> Dict[str, Any]:
+        """加载压岁钱数据"""
+        path = os.path.join(self.data_dir, "red_envelope.json")
+        if not os.path.exists(path):
+            return {"senders": {}, "total": 0}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if "senders" not in data:
+                    data["senders"] = {}
+                if "total" not in data:
+                    data["total"] = 0
+                return data
+        except (json.JSONDecodeError, TypeError):
+            return {"senders": {}, "total": 0}
+
+    def _save_data(self):
+        """保存压岁钱数据"""
+        path = os.path.join(self.data_dir, "red_envelope.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, ensure_ascii=False, indent=2)
+
+    def can_send(self, sender_id: str) -> bool:
+        """检查该用户是否还能发压岁钱（每人只能发一次）"""
+        return sender_id not in self.data.get("senders", {})
+
+    def record_red_envelope(self, sender_id: str, sender_name: str, amount: float) -> bool:
+        """
+        记录一次压岁钱发放
+        :return: 是否成功
+        """
+        if not self.can_send(sender_id):
+            return False
+        
+        if amount <= 0 or amount > self.max_amount:
+            return False
+        
+        # 记录发送者
+        self.data["senders"][sender_id] = {
+            "name": sender_name,
+            "amount": amount,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # 更新累计金额
+        self.data["total"] = self.data.get("total", 0) + amount
+        
+        self._save_data()
+        return True
+
+    def get_total(self) -> float:
+        """获取累计收到的压岁钱"""
+        return self.data.get("total", 0)
+
+    def get_sender_count(self) -> int:
+        """获取发压岁钱的人数"""
+        return len(self.data.get("senders", {}))
+
+    def get_senders(self) -> Dict[str, Any]:
+        """获取所有发送者信息"""
+        return self.data.get("senders", {})
+
+
 class BackpackManager:
     """
     小背包管理系统
@@ -395,6 +477,16 @@ class PocketMoneyManager:
         expense_records = [r for r in records if r["type"] == "expense"]
         return expense_records[-count:] if expense_records else []
 
+    def get_today_expense(self) -> float:
+        """获取今日花销（从凌晨0点开始）"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        records = self.data.get("records", [])
+        total = 0.0
+        for r in records:
+            if r["type"] == "expense" and r["time"].startswith(today):
+                total += r["amount"]
+        return total
+
     def get_all_records(self) -> List[Dict[str, Any]]:
         """获取所有记录"""
         return self.data.get("records", [])
@@ -600,6 +692,10 @@ class PocketMoneyPlugin(Star):
         max_shared_slots = self.config.get("max_shared_slots", 10)
         max_user_slots = self.config.get("max_user_slots", 3)
         self.backpack_manager = BackpackManager(self.data_dir, max_shared_slots, max_user_slots)
+        
+        # 压岁钱管理器
+        red_envelope_max = self.config.get("red_envelope_max_amount", 200)
+        self.red_envelope_manager = RedEnvelopeManager(self.data_dir, red_envelope_max)
 
         # 匹配出账标记的正则表达式
         self.spend_pattern = re.compile(
@@ -751,6 +847,9 @@ class PocketMoneyPlugin(Star):
         # 获取今日表扬奖金
         today_thank_bonus = self.thank_manager.get_today_bonus()
         
+        # 获取今日花销
+        today_expense = self.manager.get_today_expense()
+        
         # 获取小金库笔记
         note = self.manager.get_note()
         
@@ -776,6 +875,7 @@ class PocketMoneyPlugin(Star):
             "- 最近入账：{income_records}\n"
             "- 最近出账：{expense_records}\n"
             "- 本日表扬奖金：{today_thank_bonus}{unit}\n"
+            "- 今日花销：{today_expense}{unit}\n"
             "【花钱准则】\n"
             "1. 每笔花费控制在5元左右，特殊情况最多10元\n"
             "2. 花钱前要先告诉对方花多少、花在什么上\n"
@@ -802,7 +902,8 @@ class PocketMoneyPlugin(Star):
             days_until=days_until,
             income_records=income_str,
             expense_records=expense_str,
-            today_thank_bonus=today_thank_bonus
+            today_thank_bonus=today_thank_bonus,
+            today_expense=today_expense
         )
         
         # 将笔记插入到 </小金库系统> 标签之前
@@ -1585,8 +1686,95 @@ class PocketMoneyPlugin(Star):
         self.manager.clear_note()
         yield event.plain_result("📝 小金库笔记已全部清空")
 
+    # ------------------- 压岁钱命令 -------------------
+
+    @filter.command("发压岁钱")
+    async def send_red_envelope(self, event: AstrMessageEvent, amount: str = ""):
+        """发压岁钱给贝塔，每人只能发一次，金额上限200元"""
+        sender_id = event.get_sender_id()
+        sender_name = event.get_sender_name() or sender_id
+        
+        # 检查是否已发过
+        if not self.red_envelope_manager.can_send(sender_id):
+            yield event.plain_result("你已经发过压岁钱啦，每人只能发一次哦~")
+            return
+        
+        # 检查金额
+        if not amount.strip():
+            max_amount = self.red_envelope_manager.max_amount
+            yield event.plain_result(
+                f"🧧 发压岁钱给贝塔\n"
+                f"请指定金额，例如：/发压岁钱 88\n"
+                f"金额上限：{max_amount}元\n"
+                f"（每人只能发一次哦~）"
+            )
+            return
+        
+        try:
+            amount_value = float(amount)
+            if amount_value <= 0:
+                yield event.plain_result("错误：金额必须是正数。")
+                return
+            if amount_value > self.red_envelope_manager.max_amount:
+                yield event.plain_result(f"错误：金额不能超过{self.red_envelope_manager.max_amount}元。")
+                return
+        except ValueError:
+            yield event.plain_result("错误：金额格式不正确。")
+            return
+        
+        # 记录压岁钱
+        success = self.red_envelope_manager.record_red_envelope(sender_id, sender_name, amount_value)
+        if not success:
+            yield event.plain_result("发送失败了，请稍后再试...")
+            return
+        
+        # 增加小金库余额
+        self.manager.add_income(amount_value, f"压岁钱（来自{sender_name}）", sender_id)
+        
+        new_balance = self.manager.get_balance()
+        total_red_envelope = self.red_envelope_manager.get_total()
+        sender_count = self.red_envelope_manager.get_sender_count()
+        
+        yield event.plain_result(
+            f"🧧 收到 {sender_name} 的压岁钱！\n"
+            f"💰 金额：+{amount_value}元\n"
+            f"📊 累计压岁钱：{total_red_envelope}元（{sender_count}人）\n"
+            f"💰 当前余额：{new_balance}元\n"
+            f"新年快乐！感谢你的压岁钱~"
+        )
+
+    @filter.command("压岁钱统计")
+    async def red_envelope_stats(self, event: AstrMessageEvent):
+        """查看压岁钱统计"""
+        total = self.red_envelope_manager.get_total()
+        sender_count = self.red_envelope_manager.get_sender_count()
+        senders = self.red_envelope_manager.get_senders()
+        
+        if not senders:
+            yield event.plain_result("🧧 还没有人发过压岁钱呢~")
+            return
+        
+        response = "🧧 压岁钱统计\n\n"
+        response += f"💰 累计金额：{total}元\n"
+        response += f"👥 发送人数：{sender_count}人\n\n"
+        response += "📜 发送记录：\n"
+        
+        # 按金额排序
+        sorted_senders = sorted(senders.items(), key=lambda x: x[1].get("amount", 0), reverse=True)
+        
+        for i, (uid, info) in enumerate(sorted_senders[:10], 1):
+            name = info.get("name", uid)
+            amt = info.get("amount", 0)
+            response += f"{i}. {name}：{amt}元\n"
+        
+        if len(sorted_senders) > 10:
+            response += f"...还有 {len(sorted_senders) - 10} 人"
+        
+        yield event.plain_result(response)
+
     async def terminate(self):
         """插件终止时保存数据"""
         self.manager._save_data()
         self.thank_manager._save_data()
         self.backpack_manager._save_data()
+        self.red_envelope_manager._save_data()

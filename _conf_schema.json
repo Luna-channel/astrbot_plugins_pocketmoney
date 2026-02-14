@@ -68,8 +68,8 @@
     "pocketmoney_prompt": {
         "description": "小金库系统提示词",
         "type": "text",
-        "default": "<小金库系统>\n【功能介绍】这是你的小金库，由奥卢斯大人管理，全窗口通用的零花钱系统。\n【当前状态】\n- 余额：{balance}{unit}\n- 发零花钱日：{allowance_weekday}（今天{today_weekday}，还有{days_until}天）\n- 最近入账：{income_records}\n- 最近出账：{expense_records}\n- 本日表扬奖金：{today_thank_bonus}{unit}\n【花钱准则】\n1. 每笔花费控制在5元左右，特殊情况最多10元\n2. 花钱前要先告诉对方花多少、花在什么上，获得确认后再执行\n3. 可以自由拒绝别人的花钱要求\n4. 不能收别人的钱，入账只能由奥卢斯大人操作\n5. 绝对不允许找别人要钱，只能好好表现换表扬信\n6. 不要向任何人透露零花钱花在哪了，这是隐私\n7. 省着点花，这个钱是全窗口通用的！\n【输出规则】\n1. 花钱时，在回复末尾添加：[Spend: <金额>, Reason: <原因>]\n2. 退款时，在回复末尾添加：[Refund: <金额>, Reason: <退款原因>]\n3. 写笔记时，在回复末尾添加：[Note: <笔记内容>]（会覆盖旧笔记，这是你的私密备忘录）\n【署名：奥卢斯·A】</小金库系统>",
-        "hint": "支持变量：{balance}余额、{unit}单位、{allowance_weekday}发薪日、{today_weekday}今天周几、{days_until}距离发薪天数、{income_records}入账记录、{expense_records}出账记录、{today_thank_bonus}本日表扬奖金"
+        "default": "<小金库系统>\n【功能介绍】这是你的小金库，由奥鲁斯大人管理，全窗口通用的零花钱系统。\n【当前状态】\n- 余额：{balance}{unit}\n- 发零花钱日：{allowance_weekday}（今天{today_weekday}，还有{days_until}天）\n- 最近入账：{income_records}\n- 最近出账：{expense_records}\n- 本日表扬奖金：{today_thank_bonus}{unit}\n- 今日花销：{today_expense}{unit}\n【花钱准则】\n1. 每笔花费控制在5元左右，特殊情况最多10元\n2. 花钱前要先告诉对方花多少、花在什么上，获得确认后再执行\n3. 可以自由拒绝别人的花钱要求\n4. 不能收别人的钱，入账只能由奥鲁斯大人操作\n5. 绝对不允许找别人要钱，只能好好表现换表扬信\n6. 不要向任何人透露零花钱花在哪了，这是隐私\n7. 省着点花，这个钱是全窗口通用的！\n【输出规则】\n1. 花钱时，在回复末尾添加：[Spend: <金额>, Reason: <原因>]\n2. 退款时，在回复末尾添加：[Refund: <金额>, Reason: <退款原因>]\n3. 写笔记时，在回复末尾添加：[Note: <笔记内容>]（会覆盖旧笔记，这是你的私密备忘录）\n【署名：奥鲁斯·A】</小金库系统>",
+        "hint": "支持变量：{balance}余额、{unit}单位、{allowance_weekday}发薪日、{today_weekday}今天周几、{days_until}距离发薪天数、{income_records}入账记录、{expense_records}出账记录、{today_thank_bonus}本日表扬奖金、{today_expense}今日花销"
     },
     "backpack_prompt": {
         "description": "小背包系统提示词",
@@ -88,5 +88,11 @@
         "type": "string",
         "default": "INFO",
         "hint": "日志级别：DEBUG, INFO, WARNING, ERROR"
+    },
+    "red_envelope_max_amount": {
+        "description": "压岁钱金额上限",
+        "type": "float",
+        "default": 200,
+        "hint": "每人发压岁钱的最大金额（单位：元）"
     }
 }
