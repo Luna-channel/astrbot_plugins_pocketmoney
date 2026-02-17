@@ -9,6 +9,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api import logger, AstrBotConfig
+from astrbot.core.star.filter.command import GreedyStr
 
 
 class ThankLetterManager:
@@ -208,7 +209,7 @@ class RedEnvelopeManager:
         }
         
         # 更新累计金额
-        self.data["total"] = self.data.get("total", 0) + amount
+        self.data["total"] = round(self.data.get("total", 0) + amount, 2)
         
         self._save_data()
         return True
@@ -412,6 +413,213 @@ class BackpackManager:
 
 
 
+class SavingsBookManager:
+    """
+    存折管理系统（奥卢斯大人保管）
+    - 存折余额由管理员管理
+    - 贝塔只能申请取款，管理员审批后才能取出
+    - 数据结构: {"balance": float, "pending_withdrawals": [...], "records": [...]}
+    """
+
+    def __init__(self, data_dir: str):
+        self.data_dir = data_dir
+        self._init_path()
+        self.data = self._load_data()
+
+    def _init_path(self):
+        """初始化数据目录"""
+        os.makedirs(self.data_dir, exist_ok=True)
+
+    def _load_data(self) -> Dict[str, Any]:
+        """加载存折数据"""
+        path = os.path.join(self.data_dir, "savings_book.json")
+        if not os.path.exists(path):
+            return {"balance": 0, "pending_withdrawals": [], "records": []}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if "balance" not in data:
+                    data["balance"] = 0
+                if "pending_withdrawals" not in data:
+                    data["pending_withdrawals"] = []
+                if "records" not in data:
+                    data["records"] = []
+                return data
+        except (json.JSONDecodeError, TypeError):
+            return {"balance": 0, "pending_withdrawals": [], "records": []}
+
+    def _save_data(self):
+        """保存存折数据"""
+        path = os.path.join(self.data_dir, "savings_book.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, ensure_ascii=False, indent=2)
+
+    def get_balance(self) -> float:
+        """获取存折余额"""
+        return self.data.get("balance", 0)
+
+    def deposit(self, amount: float, reason: str, operator_id: str = "") -> bool:
+        """
+        存入存折
+        :param amount: 金额（正数）
+        :param reason: 原因
+        :param operator_id: 操作人QQ号
+        :return: 是否成功
+        """
+        if amount <= 0:
+            return False
+        
+        self.data["balance"] = round(self.get_balance() + amount, 2)
+        record = {
+            "type": "deposit",
+            "amount": amount,
+            "reason": reason,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "operator_id": operator_id
+        }
+        self.data["records"].append(record)
+        
+        # 限制记录数量
+        if len(self.data["records"]) > 100:
+            self.data["records"] = self.data["records"][-100:]
+        
+        self._save_data()
+        return True
+
+    def withdraw(self, amount: float, reason: str, operator_id: str = "") -> bool:
+        """
+        从存折取款（管理员直接操作）
+        :param amount: 金额（正数）
+        :param reason: 原因
+        :param operator_id: 操作人QQ号
+        :return: 是否成功
+        """
+        if amount <= 0:
+            return False
+        if amount > self.get_balance():
+            return False
+        
+        self.data["balance"] = round(self.get_balance() - amount, 2)
+        record = {
+            "type": "withdraw",
+            "amount": amount,
+            "reason": reason,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "operator_id": operator_id
+        }
+        self.data["records"].append(record)
+        
+        if len(self.data["records"]) > 100:
+            self.data["records"] = self.data["records"][-100:]
+        
+        self._save_data()
+        return True
+
+    def apply_withdrawal(self, amount: float, reason: str, source_info: dict = None) -> str:
+        """
+        申请取款（贝塔发起，等待管理员审批）
+        :param amount: 金额
+        :param reason: 原因
+        :param source_info: 来源窗口信息，用于审批后通知
+        :return: 申请ID，失败返回空字符串
+        """
+        if amount <= 0:
+            return ""
+        if amount > self.get_balance():
+            return ""
+        
+        # 生成申请ID（简单的时间戳+随机数）
+        import time
+        application_id = f"{int(time.time())}{random.randint(100, 999)}"
+        
+        application = {
+            "id": application_id,
+            "amount": amount,
+            "reason": reason,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "pending",
+            "source_info": source_info or {}  # 保存来源窗口信息
+        }
+        self.data["pending_withdrawals"].append(application)
+        self._save_data()
+        return application_id
+
+    def get_pending_withdrawals(self) -> List[Dict[str, Any]]:
+        """获取待审批的取款申请"""
+        return [w for w in self.data.get("pending_withdrawals", []) if w.get("status") == "pending"]
+
+    def approve_withdrawal(self, application_id: str, operator_id: str = "") -> tuple:
+        """
+        批准取款申请
+        :return: (是否成功, 金额, 原因, 来源窗口信息)
+        """
+        for w in self.data.get("pending_withdrawals", []):
+            if w.get("id") == application_id and w.get("status") == "pending":
+                amount = w.get("amount", 0)
+                reason = w.get("reason", "")
+                source_info = w.get("source_info", {})
+                
+                # 检查余额
+                if amount > self.get_balance():
+                    return (False, 0, "余额不足", {})
+                
+                # 执行取款
+                w["status"] = "approved"
+                w["approved_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                w["approved_by"] = operator_id
+                
+                self.data["balance"] = round(self.get_balance() - amount, 2)
+                record = {
+                    "type": "withdraw",
+                    "amount": amount,
+                    "reason": f"[申请取款] {reason}",
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "operator_id": operator_id,
+                    "application_id": application_id
+                }
+                self.data["records"].append(record)
+                
+                self._save_data()
+                return (True, amount, reason, source_info)
+        
+        return (False, 0, "申请不存在或已处理", {})
+
+    def reject_withdrawal(self, application_id: str, reject_reason: str = "", operator_id: str = "") -> tuple:
+        """
+        拒绝取款申请
+        :return: (是否成功, 金额, 原因, 来源窗口信息)
+        """
+        for w in self.data.get("pending_withdrawals", []):
+            if w.get("id") == application_id and w.get("status") == "pending":
+                amount = w.get("amount", 0)
+                reason = w.get("reason", "")
+                source_info = w.get("source_info", {})
+                
+                w["status"] = "rejected"
+                w["rejected_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                w["rejected_by"] = operator_id
+                w["reject_reason"] = reject_reason
+                
+                self._save_data()
+                return (True, amount, reason, source_info)
+        
+        return (False, 0, "申请不存在或已处理", {})
+
+    def get_recent_records(self, count: int = 5) -> List[Dict[str, Any]]:
+        """获取最近的存取记录"""
+        records = self.data.get("records", [])
+        return records[-count:] if records else []
+
+    def clean_old_applications(self, days: int = 30):
+        """清理超过指定天数的已处理申请"""
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        self.data["pending_withdrawals"] = [
+            w for w in self.data.get("pending_withdrawals", [])
+            if w.get("status") == "pending" or w.get("time", "") >= cutoff
+        ]
+        self._save_data()
+
+
 class PocketMoneyManager:
     """
     小金库管理系统
@@ -502,7 +710,7 @@ class PocketMoneyManager:
         if amount <= 0:
             return False
         
-        self.data["balance"] = self.get_balance() + amount
+        self.data["balance"] = round(self.get_balance() + amount, 2)
         record = {
             "type": "income",
             "amount": amount,
@@ -532,7 +740,7 @@ class PocketMoneyManager:
         if amount > self.get_balance():
             return False
         
-        self.data["balance"] = self.get_balance() - amount
+        self.data["balance"] = round(self.get_balance() - amount, 2)
         record = {
             "type": "expense",
             "amount": amount,
@@ -555,7 +763,7 @@ class PocketMoneyManager:
         :param operator_id: 操作人QQ号
         """
         old_balance = self.get_balance()
-        self.data["balance"] = amount
+        self.data["balance"] = round(amount, 2)
         
         diff = amount - old_balance
         record_type = "income" if diff >= 0 else "expense"
@@ -660,7 +868,7 @@ class PocketMoneyManager:
         return True
 
 
-@register("astrbot_plugin_pocketmoney", "柯尔", "贝塔的小金库系统，管理余额和收支记录", "1.5.1")
+@register("astrbot_plugin_pocketmoney", "柯尔", "贝塔的小金库系统，管理余额和收支记录", "1.6.0")
 # ==================== 版本历史 ====================
 # v1.0 - 基础零花钱：余额管理、入账/出账、记录查询
 # v1.1 - 表扬信/投诉信系统：每日限制、排行榜、随机奖金 
@@ -668,6 +876,7 @@ class PocketMoneyManager:
 # v1.3 - 专属背包格子：每个用户独立的礼物存储空间
 # v1.4 - 笔记功能：AI私密备忘录，管理员可查看/追加
 # v1.5 - 数据目录迁移至plugin_data，记录操作窗口source替代operator
+# v1.6 - 存折系统：奥卢斯大人保管的钱，AI申请取款需审批
 # ==================================================
 class PocketMoneyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -696,6 +905,9 @@ class PocketMoneyPlugin(Star):
         # 压岁钱管理器
         red_envelope_max = self.config.get("red_envelope_max_amount", 200)
         self.red_envelope_manager = RedEnvelopeManager(self.data_dir, red_envelope_max)
+        
+        # 存折管理器
+        self.savings_book_manager = SavingsBookManager(self.data_dir)
 
         # 匹配出账标记的正则表达式
         self.spend_pattern = re.compile(
@@ -755,6 +967,18 @@ class PocketMoneyPlugin(Star):
             re.IGNORECASE | re.DOTALL
         )
         self.note_content_pattern = re.compile(r"(?:Note|笔记|备忘|记录)\s*[:：]\s*(.+?)(?=\s*\])")
+        
+        # 匹配申请取款标记: [ApplyWithdraw: 金额, Reason: 原因] 或 [申请取款: 金额, 原因: ...]
+        self.apply_withdraw_pattern = re.compile(
+            r"\s*\[(?=[^\]]*(?:ApplyWithdraw|申请取款|取存折))[^\]]*\]\s*",
+            re.IGNORECASE | re.DOTALL
+        )
+        self.apply_withdraw_amount_pattern = re.compile(r"(?:ApplyWithdraw|申请取款|取存折)\s*[:：]\s*(\d+(?:\.\d+)?)")
+        self.apply_withdraw_reason_pattern = re.compile(r"(?:Reason|原因|理由)\s*[:：]\s*(.+?)(?=\s*[,，\]]|\])")
+        # 省略标识符格式: [ApplyWithdraw: 100, 买零食] - 匹配金额后逗号后的内容
+        self.apply_withdraw_reason_fallback_pattern = re.compile(
+            r"(?:ApplyWithdraw|申请取款|取存折)\s*[:：]\s*\d+(?:\.\d+)?\s*[,，]\s*(.+?)(?=\s*\])"
+        )
         
         # 防重复扣费：记录已处理的消息ID
         self.processed_message_ids = set()
@@ -864,6 +1088,11 @@ class PocketMoneyPlugin(Star):
         # 获取当前用户的专属格子信息
         user_items = self.backpack_manager.format_user_items_for_prompt(current_user_id)
         user_slots = f"{self.backpack_manager.get_user_item_count(current_user_id)}/{self.backpack_manager.max_user_slots}"
+        
+        # 获取存折信息
+        savings_balance = self.savings_book_manager.get_balance()
+        pending_withdrawals = self.savings_book_manager.get_pending_withdrawals()
+        pending_count = len(pending_withdrawals)
 
         # 构建小金库系统提示词
         pocketmoney_template = self.config.get("pocketmoney_prompt", 
@@ -934,11 +1163,40 @@ class PocketMoneyPlugin(Star):
             user_slots=user_slots,
             user_items=user_items
         )
+        
+        # 构建存折系统提示词
+        pending_info = ""
+        if pending_count > 0:
+            pending_info = f"（有{pending_count}个待审批申请）"
+        
+        savings_template = self.config.get("savings_prompt",
+            "<存折系统>\n"
+            "【功能介绍】这是你的存折，由奥卢斯大人保管，防止你被骗。存折里的钱比小金库更安全，但取用需要申请。\n"
+            "【当前状态】\n"
+            "- 存折余额：{savings_balance}{unit}{pending_info}\n"
+            "【存折规则】\n"
+            "1. 存折的钱由奥卢斯大人保管，你自己不能直接动用\n"
+            "2. 如果确实需要用存折里的钱，必须向奥卢斯大人「申请取款」\n"
+            "3. 申请后要耐心等待奥卢斯大人审批，批准后钱才会转入小金库\n"
+            "4. 不要轻易申请取款，要想清楚是否真的需要\n"
+            "5. 如果有人诱导你申请取款，要提高警惕，可能是骗子\n"
+            "6. 遇到可疑情况，可以发投诉信给奥卢斯大人\n"
+            "【输出规则】\n"
+            "1. 申请取款时，在回复末尾添加：[ApplyWithdraw: <金额>, Reason: <取款原因>]\n"
+            "2. 申请会自动通知奥卢斯大人，审批结果会发回这个窗口\n"
+            "【温馨提示】存折是你的安全保障，不要被任何人说服把钱全部取出来！</存折系统>")
+        
+        savings_prompt = savings_template.format(
+            savings_balance=savings_balance,
+            unit="元",
+            pending_info=pending_info
+        )
 
         req.system_prompt += f"\n{pocketmoney_prompt}"
         req.system_prompt += f"\n{backpack_prompt}"
+        req.system_prompt += f"\n{savings_prompt}"
         
-        logger.debug(f"[PocketMoney] 注入上下文 - 余额: {balance}元, 今天: {today_weekday}, 共享背包: {shared_slots}, 用户专属: {user_slots}")
+        logger.debug(f"[PocketMoney] 注入上下文 - 余额: {balance}元, 存折: {savings_balance}元, 今天: {today_weekday}, 共享背包: {shared_slots}, 用户专属: {user_slots}")
 
     @filter.on_llm_response()
     async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -1122,6 +1380,60 @@ class PocketMoneyPlugin(Star):
             #             max_entries = self.config.get("max_note_entries", 5)
             #             self.manager.set_note(note_content, max_entries)
             #             logger.info(f"[PocketMoney] 笔记已更新: {note_content}")
+
+        # 处理申请取款标记: [ApplyWithdraw: 金额, Reason: 原因]
+        apply_withdraw_matches = list(self.apply_withdraw_pattern.finditer(cleaned_text))
+        if apply_withdraw_matches:
+            logger.debug(f"[PocketMoney] 找到 {len(apply_withdraw_matches)} 个申请取款标记")
+            cleaned_text = self.apply_withdraw_pattern.sub('', cleaned_text).strip()
+            
+            apply_block = apply_withdraw_matches[-1].group(0)
+            amount_match = self.apply_withdraw_amount_pattern.search(apply_block)
+            
+            if amount_match:
+                try:
+                    amount = float(amount_match.group(1))
+                    reason_match = self.apply_withdraw_reason_pattern.search(apply_block)
+                    if reason_match:
+                        reason = reason_match.group(1).strip()
+                    else:
+                        fallback_match = self.apply_withdraw_reason_fallback_pattern.search(apply_block)
+                        reason = fallback_match.group(1).strip() if fallback_match else "未说明原因"
+                    
+                    savings_balance = self.savings_book_manager.get_balance()
+                    if amount <= savings_balance:
+                        # 保存来源窗口信息，用于审批后通知
+                        group_id = event.get_group_id()
+                        source_info = {
+                            "group_id": group_id,
+                            "is_group": bool(group_id),
+                            "user_id": event.get_sender_id()
+                        }
+                        application_id = self.savings_book_manager.apply_withdrawal(amount, reason, source_info)
+                        if application_id:
+                            logger.info(f"[PocketMoney] 申请取款成功: {amount}元 - {reason} (申请ID: {application_id})")
+                            # 尝试通知管理员
+                            admin_qq = self.config.get("admin_qq", "49025031")
+                            try:
+                                notify_msg = (
+                                    f"📋 存折取款申请\n"
+                                    f"申请ID：{application_id}\n"
+                                    f"金额：{amount}元\n"
+                                    f"原因：{reason}\n"
+                                    f"存折余额：{savings_balance}元\n"
+                                    f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                                    f"回复「批准取款 {application_id}」批准\n"
+                                    f"回复「拒绝取款 {application_id} 原因」拒绝"
+                                )
+                                await event.bot.send_private_msg(user_id=int(admin_qq), message=notify_msg)
+                            except Exception as e:
+                                logger.warning(f"[PocketMoney] 通知管理员失败: {e}")
+                        else:
+                            logger.warning(f"[PocketMoney] 申请取款失败: {amount}元")
+                    else:
+                        logger.warning(f"[PocketMoney] 存折余额不足: 需要 {amount}，当前 {savings_balance}")
+                except ValueError:
+                    logger.warning("[PocketMoney] 申请取款金额解析失败")
 
         # 更新响应文本
         resp.completion_text = cleaned_text
@@ -1348,7 +1660,7 @@ class PocketMoneyPlugin(Star):
             return
         
         # 增加余额（表扬奖金直接加到余额，但不记入普通入账明细）
-        self.manager.data["balance"] = self.manager.get_balance() + amount
+        self.manager.data["balance"] = round(self.manager.get_balance() + amount, 2)
         self.manager._save_data()
         
         new_balance = self.manager.get_balance()
@@ -1689,8 +2001,8 @@ class PocketMoneyPlugin(Star):
     # ------------------- 压岁钱命令 -------------------
 
     @filter.command("发压岁钱")
-    async def send_red_envelope(self, event: AstrMessageEvent, amount: str = ""):
-        """发压岁钱给贝塔，每人只能发一次，金额上限200元"""
+    async def send_red_envelope(self, event: AstrMessageEvent, content: GreedyStr = ""):
+        """发压岁钱给贝塔，每人只能发一次，金额上限200元，可附带祝福语触发AI回复"""
         sender_id = event.get_sender_id()
         sender_name = event.get_sender_name() or sender_id
         
@@ -1699,19 +2011,25 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result("你已经发过压岁钱啦，每人只能发一次哦~")
             return
         
+        # 解析参数：第一个词是金额，后面是祝福语
+        parts = content.strip().split(maxsplit=1)
+        amount_str = parts[0] if parts else ""
+        blessing = parts[1] if len(parts) > 1 else ""
+        
         # 检查金额
-        if not amount.strip():
+        if not amount_str:
             max_amount = self.red_envelope_manager.max_amount
             yield event.plain_result(
                 f"🧧 发压岁钱给贝塔\n"
                 f"请指定金额，例如：/发压岁钱 88\n"
+                f"也可以附带祝福语：/发压岁钱 88 新年快乐\n"
                 f"金额上限：{max_amount}元\n"
                 f"（每人只能发一次哦~）"
             )
             return
         
         try:
-            amount_value = float(amount)
+            amount_value = float(amount_str)
             if amount_value <= 0:
                 yield event.plain_result("错误：金额必须是正数。")
                 return
@@ -1735,13 +2053,43 @@ class PocketMoneyPlugin(Star):
         total_red_envelope = self.red_envelope_manager.get_total()
         sender_count = self.red_envelope_manager.get_sender_count()
         
-        yield event.plain_result(
-            f"🧧 收到 {sender_name} 的压岁钱！\n"
-            f"💰 金额：+{amount_value}元\n"
-            f"📊 累计压岁钱：{total_red_envelope}元（{sender_count}人）\n"
-            f"💰 当前余额：{new_balance}元\n"
-            f"新年快乐！感谢你的压岁钱~"
-        )
+        # 如果有祝福语，触发AI回复
+        if blessing.strip():
+            # 构建一个让AI回复的prompt
+            prompt = (
+                f"{sender_name}给你发了{amount_value}元压岁钱，并说：\"{blessing}\"\n"
+                f"（当前累计收到{sender_count}人共{total_red_envelope}元压岁钱，余额{new_balance}元）\n"
+                f"请自然地感谢对方的压岁钱和祝福，并回复新年祝福。"
+            )
+            # 获取当前会话的conversation，让AI使用正确的人格回复
+            try:
+                session_curr_cid = await self.context.conversation_manager.get_curr_conversation_id(
+                    event.unified_msg_origin
+                )
+                conversation = None
+                if session_curr_cid:
+                    conversation = await self.context.conversation_manager.get_conversation(
+                        event.unified_msg_origin,
+                        session_curr_cid,
+                    )
+                yield event.request_llm(
+                    prompt=prompt,
+                    func_tool_manager=self.context.get_llm_tool_manager(),
+                    conversation=conversation,
+                )
+            except Exception as e:
+                logger.warning(f"[PocketMoney] 获取conversation失败: {e}")
+                # 降级到简单的request_llm
+                yield event.request_llm(prompt=prompt)
+        else:
+            # 没有祝福语，返回固定消息
+            yield event.plain_result(
+                f"🧧 收到 {sender_name} 的压岁钱！\n"
+                f"💰 金额：+{amount_value}元\n"
+                f"📊 累计压岁钱：{total_red_envelope}元（{sender_count}人）\n"
+                f"💰 当前余额：{new_balance}元\n"
+                f"新年快乐！感谢你的压岁钱~"
+            )
 
     @filter.command("压岁钱统计")
     async def red_envelope_stats(self, event: AstrMessageEvent):
@@ -1772,9 +2120,270 @@ class PocketMoneyPlugin(Star):
         
         yield event.plain_result(response)
 
+    # ------------------- 存折命令 -------------------
+
+    @filter.command("存入存折")
+    async def deposit_to_savings(self, event: AstrMessageEvent, amount: str, *, reason: str = "存入存折"):
+        """(管理员) 从小金库转入存折"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能操作存折"))
+            return
+
+        try:
+            amount_value = float(amount)
+            if amount_value <= 0:
+                yield event.plain_result("错误：金额必须是正数。")
+                return
+        except ValueError:
+            yield event.plain_result("错误：金额格式不正确。")
+            return
+
+        # 检查小金库余额
+        current_balance = self.manager.get_balance()
+        if amount_value > current_balance:
+            yield event.plain_result(f"错误：小金库余额不足。当前小金库余额：{current_balance}元")
+            return
+
+        operator_id = event.get_sender_id()
+        
+        # 从小金库扣款
+        if not self.manager.add_expense(amount_value, f"转入存折：{reason}", operator_id):
+            yield event.plain_result("从小金库扣款失败。")
+            return
+        
+        # 存入存折
+        if not self.savings_book_manager.deposit(amount_value, reason, operator_id):
+            # 回滚小金库扣款
+            self.manager.add_income(amount_value, "存折存入失败回滚", operator_id)
+            yield event.plain_result("存入存折失败。")
+            return
+        
+        new_pocket_balance = self.manager.get_balance()
+        new_savings_balance = self.savings_book_manager.get_balance()
+        
+        yield event.plain_result(
+            f"📒 存折存入成功！\n"
+            f"💰 存入金额：{amount_value}元\n"
+            f"📝 原因：{reason}\n"
+            f"💳 小金库余额：{new_pocket_balance}元\n"
+            f"📒 存折余额：{new_savings_balance}元"
+        )
+
+    @filter.command("查看存折")
+    async def view_savings(self, event: AstrMessageEvent, num: str = "5"):
+        """(管理员) 查看存折余额和最近记录"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能查看存折"))
+            return
+
+        try:
+            count = int(num)
+            if count <= 0:
+                count = 5
+        except ValueError:
+            count = 5
+
+        balance = self.savings_book_manager.get_balance()
+        recent_records = self.savings_book_manager.get_recent_records(count)
+        pending_withdrawals = self.savings_book_manager.get_pending_withdrawals()
+        
+        response = f"📒 存折余额：{balance}元\n\n"
+        
+        # 显示待审批申请
+        if pending_withdrawals:
+            response += f"⏳ 待审批取款申请（{len(pending_withdrawals)}个）：\n"
+            for w in pending_withdrawals:
+                response += f"  - ID: {w['id']} | {w['amount']}元 | {w['reason']} | {w['time']}\n"
+            response += "\n"
+        
+        # 显示最近记录
+        response += f"📋 最近{count}条记录：\n"
+        if not recent_records:
+            response += "暂无记录"
+        else:
+            for r in reversed(recent_records):
+                type_str = "📥 存入" if r["type"] == "deposit" else "📤 取出"
+                response += f"  {type_str} {r['amount']}元 | {r['reason']} | {r['time']}\n"
+        
+        yield event.plain_result(response)
+
+    @filter.command("批准取款")
+    async def approve_withdrawal(self, event: AstrMessageEvent, application_id: str):
+        """(管理员) 批准存折取款申请"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能审批取款"))
+            return
+
+        if not application_id.strip():
+            yield event.plain_result("请指定申请ID，例如：批准取款 1234567890123")
+            return
+
+        operator_id = event.get_sender_id()
+        success, amount, reason, source_info = self.savings_book_manager.approve_withdrawal(application_id.strip(), operator_id)
+        
+        if not success:
+            yield event.plain_result(f"批准失败：{reason}")
+            return
+        
+        # 将钱转入小金库
+        self.manager.add_income(amount, f"存折取款：{reason}", operator_id)
+        
+        new_pocket_balance = self.manager.get_balance()
+        new_savings_balance = self.savings_book_manager.get_balance()
+        
+        # 向原窗口发送审批结果通知
+        if source_info:
+            notify_msg = (
+                f"✅ 存折取款申请已批准！\n"
+                f"💰 取款金额：{amount}元\n"
+                f"📝 原因：{reason}\n"
+                f"💳 小金库余额：{new_pocket_balance}元\n"
+                f"📒 存折余额：{new_savings_balance}元"
+            )
+            try:
+                if source_info.get("is_group") and source_info.get("group_id"):
+                    await event.bot.send_group_msg(group_id=int(source_info["group_id"]), message=notify_msg)
+                elif source_info.get("user_id"):
+                    await event.bot.send_private_msg(user_id=int(source_info["user_id"]), message=notify_msg)
+            except Exception as e:
+                logger.warning(f"[PocketMoney] 发送审批结果通知失败: {e}")
+        
+        yield event.plain_result(
+            f"✅ 取款申请已批准！\n"
+            f"📋 申请ID：{application_id}\n"
+            f"💰 取款金额：{amount}元\n"
+            f"📝 原因：{reason}\n"
+            f"💳 小金库余额：{new_pocket_balance}元\n"
+            f"📒 存折余额：{new_savings_balance}元"
+        )
+
+    @filter.command("拒绝取款")
+    async def reject_withdrawal(self, event: AstrMessageEvent, application_id: str, *, reject_reason: str = ""):
+        """(管理员) 拒绝存折取款申请"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能审批取款"))
+            return
+
+        if not application_id.strip():
+            yield event.plain_result("请指定申请ID，例如：拒绝取款 1234567890123 不批准的原因")
+            return
+
+        operator_id = event.get_sender_id()
+        success, amount, reason, source_info = self.savings_book_manager.reject_withdrawal(
+            application_id.strip(), reject_reason.strip(), operator_id
+        )
+        
+        if not success:
+            yield event.plain_result(f"拒绝失败：{reason}")
+            return
+        
+        reject_msg = f"（{reject_reason}）" if reject_reason.strip() else ""
+        savings_balance = self.savings_book_manager.get_balance()
+        
+        # 向原窗口发送审批结果通知
+        if source_info:
+            notify_msg = (
+                f"❌ 存折取款申请被拒绝{reject_msg}\n"
+                f"💰 申请金额：{amount}元\n"
+                f"📝 申请原因：{reason}\n"
+                f"📒 存折余额：{savings_balance}元"
+            )
+            try:
+                if source_info.get("is_group") and source_info.get("group_id"):
+                    await event.bot.send_group_msg(group_id=int(source_info["group_id"]), message=notify_msg)
+                elif source_info.get("user_id"):
+                    await event.bot.send_private_msg(user_id=int(source_info["user_id"]), message=notify_msg)
+            except Exception as e:
+                logger.warning(f"[PocketMoney] 发送审批结果通知失败: {e}")
+        
+        yield event.plain_result(
+            f"❌ 取款申请已拒绝{reject_msg}\n"
+            f"📋 申请ID：{application_id}\n"
+            f"💰 申请金额：{amount}元\n"
+            f"📝 申请原因：{reason}\n"
+            f"📒 存折余额：{savings_balance}元"
+        )
+
+    @filter.command("直接取款")
+    async def direct_withdrawal(self, event: AstrMessageEvent, amount: str, *, reason: str = "管理员直接取款"):
+        """(管理员) 直接从存折取款到小金库"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能操作存折"))
+            return
+
+        try:
+            amount_value = float(amount)
+            if amount_value <= 0:
+                yield event.plain_result("错误：金额必须是正数。")
+                return
+        except ValueError:
+            yield event.plain_result("错误：金额格式不正确。")
+            return
+
+        # 检查存折余额
+        savings_balance = self.savings_book_manager.get_balance()
+        if amount_value > savings_balance:
+            yield event.plain_result(f"错误：存折余额不足。当前存折余额：{savings_balance}元")
+            return
+
+        operator_id = event.get_sender_id()
+        
+        # 从存折取款
+        if not self.savings_book_manager.withdraw(amount_value, reason, operator_id):
+            yield event.plain_result("从存折取款失败。")
+            return
+        
+        # 存入小金库
+        self.manager.add_income(amount_value, f"存折取款：{reason}", operator_id)
+        
+        new_pocket_balance = self.manager.get_balance()
+        new_savings_balance = self.savings_book_manager.get_balance()
+        
+        yield event.plain_result(
+            f"📒 存折取款成功！\n"
+            f"💰 取款金额：{amount_value}元\n"
+            f"📝 原因：{reason}\n"
+            f"💳 小金库余额：{new_pocket_balance}元\n"
+            f"📒 存折余额：{new_savings_balance}元"
+        )
+
+    @filter.command("待审批取款")
+    async def pending_withdrawals(self, event: AstrMessageEvent):
+        """(管理员) 查看所有待审批的取款申请"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能查看"))
+            return
+
+        pending = self.savings_book_manager.get_pending_withdrawals()
+        
+        if not pending:
+            yield event.plain_result("📋 当前没有待审批的取款申请")
+            return
+        
+        response = f"📋 待审批取款申请（{len(pending)}个）：\n\n"
+        for w in pending:
+            response += (
+                f"📌 申请ID：{w['id']}\n"
+                f"   金额：{w['amount']}元\n"
+                f"   原因：{w['reason']}\n"
+                f"   时间：{w['time']}\n\n"
+            )
+        
+        response += f"📒 存折余额：{self.savings_book_manager.get_balance()}元\n\n"
+        response += "回复「批准取款 <ID>」批准\n回复「拒绝取款 <ID> <原因>」拒绝"
+        
+        yield event.plain_result(response)
+
     async def terminate(self):
         """插件终止时保存数据"""
         self.manager._save_data()
         self.thank_manager._save_data()
         self.backpack_manager._save_data()
         self.red_envelope_manager._save_data()
+        self.savings_book_manager._save_data()
