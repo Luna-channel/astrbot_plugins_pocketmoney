@@ -114,6 +114,38 @@ class UserIsolationManager:
             managers["backpack"]._save_data()
         self._save_blacklist()
 
+    def sync_expense_to_all(self, amount: float, reason: str, operator_id: str, real_money_mgr: 'PocketMoneyManager'):
+        """将出账操作同步到所有隔离池（普通用户操作时调用）"""
+        for user_id in self.blacklist:
+            managers = self.get_isolated_managers(user_id, real_money_mgr, None)
+            mgr = managers["money"]
+            if amount <= mgr.get_balance():
+                mgr.add_expense(amount, reason, operator_id)
+
+    def sync_income_to_all(self, amount: float, reason: str, operator_id: str, real_money_mgr: 'PocketMoneyManager'):
+        """将入账操作同步到所有隔离池（普通用户操作时调用）"""
+        for user_id in self.blacklist:
+            managers = self.get_isolated_managers(user_id, real_money_mgr, None)
+            managers["money"].add_income(amount, reason, operator_id)
+
+    def sync_store_to_all(self, item_name: str, item_desc: str, real_backpack_mgr: 'BackpackManager'):
+        """将背包入库同步到所有隔离池"""
+        for user_id in self.blacklist:
+            managers = self.get_isolated_managers(user_id, None, real_backpack_mgr)
+            managers["backpack"].add_shared_item(item_name, item_desc)
+
+    def sync_use_to_all(self, item_name: str, real_backpack_mgr: 'BackpackManager'):
+        """将背包使用同步到所有隔离池"""
+        for user_id in self.blacklist:
+            managers = self.get_isolated_managers(user_id, None, real_backpack_mgr)
+            managers["backpack"].use_shared_item(item_name)
+
+    def sync_set_balance_to_all(self, new_balance: float, reason: str, operator_id: str, real_money_mgr: 'PocketMoneyManager'):
+        """将设置余额同步到所有隔离池"""
+        for user_id in self.blacklist:
+            managers = self.get_isolated_managers(user_id, real_money_mgr, None)
+            managers["money"].set_balance(new_balance, reason, operator_id)
+
 
 class ThankLetterManager:
     """
@@ -1016,8 +1048,8 @@ class PocketMoneyPlugin(Star):
         # 获取今日表扬奖金
         today_thank_bonus = self.thank_manager.get_today_bonus()
         
-        # 获取小金库笔记
-        note = self.manager.get_note()
+        # 获取小金库笔记（黑名单用户使用隔离池笔记）
+        note = money_mgr.get_note()
 
         # 构建存折待审批信息
         pending_info = f"（有{pending_count}个待审批申请）" if pending_count > 0 else ""
@@ -1113,11 +1145,17 @@ class PocketMoneyPlugin(Star):
                     if amount <= current_balance:
                         if money_mgr.add_expense(amount, reason, current_user_id):
                             logger.info(f"[PocketMoney] {log_prefix}出账成功: {amount} - {reason}")
+                            # 普通用户操作时，同步到所有隔离池
+                            if not is_isolated:
+                                self.isolation_manager.sync_expense_to_all(amount, reason, current_user_id, self.manager)
                     else:
                         # 保底策略：余额不足时，扣除全部余额并记录
                         if current_balance > 0:
-                            money_mgr.add_expense(current_balance, f"{reason}（原请求{amount}元，余额不足，已扣除全部）", current_user_id)
+                            fallback_reason = f"{reason}（原请求{amount}元，余额不足，已扣除全部）"
+                            money_mgr.add_expense(current_balance, fallback_reason, current_user_id)
                             logger.info(f"[PocketMoney] {log_prefix}保底出账: {current_balance}/{amount} - {reason}")
+                            if not is_isolated:
+                                self.isolation_manager.sync_expense_to_all(current_balance, fallback_reason, current_user_id, self.manager)
                         else:
                             logger.warning(f"[PocketMoney] {log_prefix}余额为0，无法扣款: {amount} - {reason}")
                 except ValueError:
@@ -1139,6 +1177,8 @@ class PocketMoneyPlugin(Star):
                 
                 if backpack_mgr.add_shared_item(item_name, item_desc):
                     logger.info(f"[PocketMoney] {log_prefix}入库成功: {item_name} - {item_desc}")
+                    if not is_isolated:
+                        self.isolation_manager.sync_store_to_all(item_name, item_desc, self.backpack_manager)
                 else:
                     logger.warning(f"[PocketMoney] 入库失败（背包已满）: {item_name}")
 
@@ -1174,6 +1214,8 @@ class PocketMoneyPlugin(Star):
                     if item_name:
                         if backpack_mgr.use_shared_item(item_name):
                             logger.info(f"[PocketMoney] {log_prefix}共享背包使用成功: {item_name}")
+                            if not is_isolated:
+                                self.isolation_manager.sync_use_to_all(item_name, self.backpack_manager)
                         else:
                             logger.warning(f"[PocketMoney] 共享背包使用失败（物品不存在）: {item_name}")
 
@@ -1215,8 +1257,11 @@ class PocketMoneyPlugin(Star):
                     refund_reason = refund_reason_match.group(1).strip() if refund_reason_match else "退款"
                     
                     if refund_amount > 0:
-                        if money_mgr.add_income(refund_amount, f"退款：{refund_reason}", current_user_id):
+                        refund_full_reason = f"退款：{refund_reason}"
+                        if money_mgr.add_income(refund_amount, refund_full_reason, current_user_id):
                             logger.info(f"[PocketMoney] {log_prefix}退款成功: +{refund_amount} - {refund_reason}")
+                            if not is_isolated:
+                                self.isolation_manager.sync_income_to_all(refund_amount, refund_full_reason, current_user_id, self.manager)
                 except ValueError:
                     logger.warning("[PocketMoney] 退款金额解析失败")
 
@@ -1306,6 +1351,8 @@ class PocketMoneyPlugin(Star):
         if not ok:
             yield event.plain_result(f"错误：{val}"); return
         if self.manager.add_income(val, reason, event.get_sender_id()):
+            # 同步到所有隔离池
+            self.isolation_manager.sync_income_to_all(val, reason, event.get_sender_id(), self.manager)
             yield event.plain_result(f"入账成功！+{val}元\n原因：{reason}\n当前余额：{self.manager.get_balance()}元")
 
     @filter.command("扣零花钱")
@@ -1318,6 +1365,8 @@ class PocketMoneyPlugin(Star):
         if val > self.manager.get_balance():
             yield event.plain_result(f"错误：余额不足。当前余额：{self.manager.get_balance()}元"); return
         if self.manager.add_expense(val, reason, event.get_sender_id()):
+            # 同步到所有隔离池
+            self.isolation_manager.sync_expense_to_all(val, reason, event.get_sender_id(), self.manager)
             yield event.plain_result(f"扣款成功！-{val}元\n原因：{reason}\n当前余额：{self.manager.get_balance()}元")
 
     @filter.command("设置余额")
@@ -1329,6 +1378,8 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result(f"错误：{val}"); return
         old = self.manager.get_balance()
         if self.manager.set_balance(val, reason, event.get_sender_id()):
+            # 同步到所有隔离池
+            self.isolation_manager.sync_set_balance_to_all(val, reason, event.get_sender_id(), self.manager)
             yield event.plain_result(f"余额已调整！\n{old}元 → {val}元\n原因：{reason}")
 
     @filter.command("查账")
@@ -1359,7 +1410,9 @@ class PocketMoneyPlugin(Star):
         total_income, total_expense = 0, 0
         for r in reversed(records):
             t = "+" if r["type"] == "income" else "-"
-            response += f"{r['time']} | {t}{r['amount']}元 | {r['reason']}\n"
+            operator_id = r.get("operator_id", "")
+            operator_str = f" | @{operator_id}" if operator_id else ""
+            response += f"{r['time']} | {t}{r['amount']}元 | {r['reason']}{operator_str}\n"
             if r["type"] == "income": total_income += r["amount"]
             else: total_expense += r["amount"]
         response += f"\n📊 统计：入账 +{total_income}元，出账 -{total_expense}元"
@@ -1401,7 +1454,12 @@ class PocketMoneyPlugin(Star):
         money_mgr.data["balance"] = round(money_mgr.get_balance() + amount, 2)
         money_mgr._save_data()
         logger.info(f"[PocketMoney] {log_prefix}表扬信奖金: +{amount}元")
-        yield event.plain_result(f"收到 {name} 的表扬信！\n💰 奖金：+{amount}元\n💰 余额：{money_mgr.get_balance()}元")
+        yield event.plain_result(
+            f"收到 {name} 的表扬信！\n"
+            f"🎉 获得表扬奖金：+{amount}元\n"
+            f"📊 本日表扬奖金：{self.thank_manager.get_today_bonus()}元\n"
+            f"💰 当前余额：{money_mgr.get_balance()}元"
+        )
 
     @filter.command("发投诉信")
     async def send_complaint_letter(self, event: AstrMessageEvent, *, reason: str = ""):
