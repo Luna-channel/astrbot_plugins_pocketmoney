@@ -1308,6 +1308,7 @@ class PocketMoneyPlugin(Star):
                                     notify_msg = (
                                         f"📋 存折取款申请\n"
                                         f"申请ID：{application_id}\n"
+                                        f"申请人QQ：{current_user_id}\n"
                                         f"金额：{amount}元\n"
                                         f"原因：{reason}\n"
                                         f"存折余额：{savings_balance}元\n"
