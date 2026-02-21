@@ -1303,7 +1303,7 @@ class PocketMoneyPlugin(Star):
                             application_id = self.manager.apply_withdrawal(amount, reason, source_info)
                             if application_id:
                                 logger.info(f"[PocketMoney] 申请取款成功: {amount}元 - {reason} (申请ID: {application_id})")
-                                admin_qq = self.config.get("admin_qq", "49025031")
+                                admin_qq = self.config.get("admin_qq", "")
                                 try:
                                     notify_msg = (
                                         f"📋 存折取款申请\n"
@@ -1332,7 +1332,7 @@ class PocketMoneyPlugin(Star):
         return event.role == "admin"
     
     def _admin_denied_msg(self):
-        return self.config.get("admin_permission_denied_msg", "这是我和奥卢斯大人之间的秘密，不能告诉你哦~")
+        return self.config.get("admin_permission_denied_msg", "这是我和奥卢斯大人之间的秘密，不能告诉你哦")
     
     def _parse_amount(self, amount_str: str, allow_zero: bool = False) -> tuple:
         """解析金额，返回 (成功, 金额或错误信息)"""
@@ -1469,7 +1469,7 @@ class PocketMoneyPlugin(Star):
         src = f"群{event.get_group_id()}" if event.get_group_id() else "私聊"
         msg = f"📮 投诉信！\n来源：{src}\n投诉人：{name}({uid})\n理由：{reason}"
         try:
-            await event.bot.send_private_msg(user_id=int(self.config.get("admin_qq", "49025031")), message=msg)
+            await event.bot.send_private_msg(user_id=int(self.config.get("admin_qq", "")), message=msg)
             yield event.plain_result("投诉信已转交给奥卢斯大人")
         except: yield event.plain_result(f"投诉已记录：{reason}")
 
@@ -1506,7 +1506,7 @@ class PocketMoneyPlugin(Star):
         slots = f"{backpack_mgr.get_user_item_count(user_id)}/{backpack_mgr.max_user_slots}"
         
         if not items:
-            yield event.plain_result(f"🎁 {user_name}，你在贝塔这里的专属格子（{slots}）：空空如也~")
+            yield event.plain_result(f"🎁 {user_name}，你在贝塔这里的专属格子（{slots}）：空空如也")
             return
         
         response = f"🎁 {user_name}，你在贝塔这里的专属格子（{slots}）：\n\n"
@@ -1523,7 +1523,7 @@ class PocketMoneyPlugin(Star):
         """(管理员) 查看贝塔的共享背包"""
         if not self._is_admin(event):
             yield event.plain_result(self.config.get("admin_permission_denied_msg", 
-                "这是贝塔的私人背包，不能随便看哦~"))
+                "这是贝塔的私人背包，不能随便看哦"))
             return
         
         items = self.backpack_manager.get_shared_items()
@@ -1882,15 +1882,8 @@ class PocketMoneyPlugin(Star):
 
         operator_id = event.get_sender_id()
         
-        # 从小金库扣款
-        if not self.manager.add_expense(amount_value, f"转入存折：{reason}", operator_id):
-            yield event.plain_result("从小金库扣款失败。")
-            return
-        
-        # 存入存折
+        # 存入存折（deposit_to_savings 内部会从小金库扣款）
         if not self.manager.deposit_to_savings(amount_value, reason, operator_id):
-            # 回滚小金库扣款
-            self.manager.add_income(amount_value, "存折存入失败回滚", operator_id)
             yield event.plain_result("存入存折失败。")
             return
         
