@@ -13,19 +13,23 @@ from astrbot.api import logger, AstrBotConfig
 
 class UserIsolationManager:
     """
-    用户隔离池管理系统（代理模式）
-    - 为每个黑名单用户创建独立的管理器实例，复用现有类
-    - 黑名单用户的操作只影响自己的隔离数据
+    用户隔离池管理系统（共享池模式）
+    - 所有黑名单用户共享一个隔离池，在里面互相斗法
+    - 黑名单用户的操作只影响隔离池数据
+    - 进入/退出隔离池时，用户专属格子数据会迁移（不清空）
     - 不提示用户进入了黑名单（静默处理）
     """
 
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
         self.isolation_dir = os.path.join(data_dir, "isolation")
-        os.makedirs(self.isolation_dir, exist_ok=True)
+        self.shared_isolation_dir = os.path.join(self.isolation_dir, "shared")
+        os.makedirs(self.shared_isolation_dir, exist_ok=True)
         self.blacklist = self._load_blacklist()
-        # 缓存已加载的隔离管理器 {user_id: {"money": PocketMoneyManager, "backpack": BackpackManager}}
-        self._managers_cache: Dict[str, Dict[str, Any]] = {}
+        # 共享隔离池管理器（单例）
+        self._shared_managers: Dict[str, Any] = None
+        # 自动迁移旧版用户隔离池数据到共享池
+        self._migrate_old_isolation_data()
 
     def _load_blacklist(self) -> List[str]:
         """加载黑名单"""
@@ -44,50 +48,202 @@ class UserIsolationManager:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.blacklist, f, ensure_ascii=False, indent=2)
 
+    def _migrate_old_isolation_data(self):
+        """
+        将旧版用户独立隔离池数据迁移到共享隔离池
+        旧结构: isolation/{user_id}/pocket_money.json, backpack.json
+        新结构: isolation/shared/pocket_money.json, backpack.json
+        """
+        if not os.path.exists(self.isolation_dir):
+            return
+        
+        # 检查是否已经迁移过（共享目录已有数据）
+        shared_money_file = os.path.join(self.shared_isolation_dir, "pocket_money.json")
+        if os.path.exists(shared_money_file):
+            # 已有共享数据，跳过迁移
+            return
+        
+        # 扫描旧的用户隔离目录
+        migrated_users = []
+        total_balance = 0
+        all_records = []
+        all_shared_items = []
+        all_user_slots = {}
+        
+        for item in os.listdir(self.isolation_dir):
+            user_dir = os.path.join(self.isolation_dir, item)
+            # 跳过 shared 目录和非目录项
+            if item == "shared" or not os.path.isdir(user_dir):
+                continue
+            
+            user_id = item
+            
+            # 读取用户的隔离池余额和记录
+            old_money_file = os.path.join(user_dir, "pocket_money.json")
+            if os.path.exists(old_money_file):
+                try:
+                    with open(old_money_file, "r", encoding="utf-8") as f:
+                        old_data = json.load(f)
+                        # 合并余额（取最高值，因为所有用户应该看到相同的初始余额）
+                        user_balance = old_data.get("balance", 0)
+                        if user_balance > total_balance:
+                            total_balance = user_balance
+                        # 合并记录
+                        for record in old_data.get("records", []):
+                            record["migrated_from"] = user_id
+                            all_records.append(record)
+                except (json.JSONDecodeError, IOError):
+                    pass
+            
+            # 读取用户的隔离池背包
+            old_backpack_file = os.path.join(user_dir, "backpack.json")
+            if os.path.exists(old_backpack_file):
+                try:
+                    with open(old_backpack_file, "r", encoding="utf-8") as f:
+                        old_bp = json.load(f)
+                        # 合并共享物品（去重）
+                        for item_data in old_bp.get("shared_items", []):
+                            if item_data not in all_shared_items:
+                                all_shared_items.append(item_data)
+                        # 合并用户专属格子
+                        for uid, items in old_bp.get("user_slots", {}).items():
+                            if uid not in all_user_slots:
+                                all_user_slots[uid] = []
+                            for item_data in items:
+                                if item_data not in all_user_slots[uid]:
+                                    all_user_slots[uid].append(item_data)
+                except (json.JSONDecodeError, IOError):
+                    pass
+            
+            migrated_users.append(user_id)
+        
+        if not migrated_users:
+            return
+        
+        # 按时间排序记录
+        all_records.sort(key=lambda x: x.get("time", ""))
+        
+        # 写入共享隔离池数据
+        shared_money_data = {
+            "balance": total_balance,
+            "records": all_records[-50:],  # 保留最近50条
+            "notes": [],
+            "savings_balance": 0,
+            "pending_withdrawals": []
+        }
+        with open(shared_money_file, "w", encoding="utf-8") as f:
+            json.dump(shared_money_data, f, ensure_ascii=False, indent=2)
+        
+        shared_backpack_file = os.path.join(self.shared_isolation_dir, "backpack.json")
+        shared_backpack_data = {
+            "shared_items": all_shared_items,
+            "user_slots": all_user_slots
+        }
+        with open(shared_backpack_file, "w", encoding="utf-8") as f:
+            json.dump(shared_backpack_data, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"[PocketMoney] 已迁移 {len(migrated_users)} 个用户的隔离池数据到共享池: {migrated_users}")
+        logger.info(f"[PocketMoney] 共享隔离池余额: {total_balance}元, 记录: {len(all_records)}条, 共享物品: {len(all_shared_items)}件")
+
     def is_blacklisted(self, user_id: str) -> bool:
         return str(user_id) in self.blacklist
 
-    def add_to_blacklist(self, user_id: str) -> bool:
+    def add_to_blacklist(self, user_id: str, real_money_mgr: 'PocketMoneyManager' = None, 
+                          real_backpack_mgr: 'BackpackManager' = None) -> bool:
+        """
+        将用户加入黑名单，并迁移其专属格子数据到隔离池
+        """
         user_id = str(user_id)
         if user_id not in self.blacklist:
             self.blacklist.append(user_id)
             self._save_blacklist()
+            
+            # 迁移用户专属格子数据到隔离池
+            if real_backpack_mgr:
+                self._migrate_user_slots_to_isolation(user_id, real_backpack_mgr)
+            
             return True
         return False
 
-    def remove_from_blacklist(self, user_id: str) -> bool:
+    def remove_from_blacklist(self, user_id: str, real_backpack_mgr: 'BackpackManager' = None) -> bool:
+        """
+        将用户从黑名单移除，并迁移其专属格子数据回真实背包
+        """
         user_id = str(user_id)
         if user_id in self.blacklist:
+            # 迁移用户专属格子数据回真实背包
+            if real_backpack_mgr and self._shared_managers:
+                self._migrate_user_slots_from_isolation(user_id, real_backpack_mgr)
+            
             self.blacklist.remove(user_id)
             self._save_blacklist()
-            # 清除缓存
-            self._managers_cache.pop(user_id, None)
             return True
         return False
+
+    def _migrate_user_slots_to_isolation(self, user_id: str, real_backpack_mgr: 'BackpackManager'):
+        """
+        将用户的专属格子数据从真实背包迁移到隔离池
+        """
+        user_items = real_backpack_mgr.get_user_items(user_id)
+        if not user_items:
+            return
+        
+        # 获取隔离池背包管理器
+        managers = self._get_or_create_shared_managers(None, real_backpack_mgr)
+        isolated_backpack = managers["backpack"]
+        
+        # 迁移每个物品到隔离池
+        for item in user_items:
+            isolated_backpack.add_user_gift(
+                user_id,
+                item.get("name", ""),
+                item.get("description", ""),
+                item.get("from", "未知")
+            )
+        
+        # 从真实背包清除该用户的专属格子
+        real_backpack_mgr.clear_user_items(user_id)
+        logger.info(f"[PocketMoney] 已迁移用户 {user_id} 的 {len(user_items)} 件专属物品到隔离池")
+
+    def _migrate_user_slots_from_isolation(self, user_id: str, real_backpack_mgr: 'BackpackManager'):
+        """
+        将用户的专属格子数据从隔离池迁移回真实背包
+        """
+        if not self._shared_managers:
+            return
+        
+        isolated_backpack = self._shared_managers["backpack"]
+        user_items = isolated_backpack.get_user_items(user_id)
+        if not user_items:
+            return
+        
+        # 迁移每个物品回真实背包
+        for item in user_items:
+            real_backpack_mgr.add_user_gift(
+                user_id,
+                item.get("name", ""),
+                item.get("description", ""),
+                item.get("from", "未知")
+            )
+        
+        # 从隔离池清除该用户的专属格子
+        isolated_backpack.clear_user_items(user_id)
+        logger.info(f"[PocketMoney] 已迁移用户 {user_id} 的 {len(user_items)} 件专属物品回真实背包")
 
     def get_blacklist(self) -> List[str]:
         return self.blacklist.copy()
 
-    def get_user_isolation_dir(self, user_id: str) -> str:
-        """获取用户的隔离数据目录"""
-        return os.path.join(self.isolation_dir, str(user_id))
-
-    def get_isolated_managers(self, user_id: str, real_money_mgr: 'PocketMoneyManager', 
-                               real_backpack_mgr: 'BackpackManager') -> Dict[str, Any]:
+    def _get_or_create_shared_managers(self, real_money_mgr: 'PocketMoneyManager', 
+                                         real_backpack_mgr: 'BackpackManager') -> Dict[str, Any]:
         """
-        获取用户的隔离管理器（懒加载，首次访问时复制真实数据）
-        返回 {"money": PocketMoneyManager, "backpack": BackpackManager}
+        获取或创建共享隔离池管理器（懒加载单例）
         """
-        user_id = str(user_id)
-        if user_id in self._managers_cache:
-            return self._managers_cache[user_id]
-        
-        user_dir = self.get_user_isolation_dir(user_id)
-        os.makedirs(user_dir, exist_ok=True)
+        if self._shared_managers is not None:
+            return self._shared_managers
         
         # 检查是否首次创建（需要复制真实数据）
-        money_file = os.path.join(user_dir, "pocket_money.json")
-        if not os.path.exists(money_file):
+        money_file = os.path.join(self.shared_isolation_dir, "pocket_money.json")
+        if not os.path.exists(money_file) and real_money_mgr:
             # 首次创建，复制当前真实余额
             init_data = {
                 "balance": real_money_mgr.get_balance(),
@@ -97,54 +253,67 @@ class UserIsolationManager:
             with open(money_file, "w", encoding="utf-8") as f:
                 json.dump(init_data, f, ensure_ascii=False, indent=2)
         
-        # 创建隔离管理器实例（复用现有类）
-        isolated_money = PocketMoneyManager(user_dir, 0, 50)
-        isolated_backpack = BackpackManager(user_dir, 10, 3)
+        # 创建共享隔离管理器实例
+        isolated_money = PocketMoneyManager(self.shared_isolation_dir, 0, 50)
+        isolated_backpack = BackpackManager(self.shared_isolation_dir, 10, 3)
         
-        self._managers_cache[user_id] = {
+        self._shared_managers = {
             "money": isolated_money,
             "backpack": isolated_backpack
         }
-        return self._managers_cache[user_id]
+        return self._shared_managers
+
+    def get_isolated_managers(self, user_id: str, real_money_mgr: 'PocketMoneyManager', 
+                               real_backpack_mgr: 'BackpackManager') -> Dict[str, Any]:
+        """
+        获取共享隔离池管理器（所有黑名单用户共用）
+        返回 {"money": PocketMoneyManager, "backpack": BackpackManager}
+        """
+        return self._get_or_create_shared_managers(real_money_mgr, real_backpack_mgr)
 
     def _save_data(self):
-        """保存所有缓存的管理器数据"""
-        for user_id, managers in self._managers_cache.items():
-            managers["money"]._save_data()
-            managers["backpack"]._save_data()
+        """保存共享隔离池数据"""
+        if self._shared_managers:
+            self._shared_managers["money"]._save_data()
+            self._shared_managers["backpack"]._save_data()
         self._save_blacklist()
 
-    def sync_expense_to_all(self, amount: float, reason: str, operator_id: str, real_money_mgr: 'PocketMoneyManager'):
-        """将出账操作同步到所有隔离池（普通用户操作时调用）"""
-        for user_id in self.blacklist:
-            managers = self.get_isolated_managers(user_id, real_money_mgr, None)
-            mgr = managers["money"]
-            if amount <= mgr.get_balance():
-                mgr.add_expense(amount, reason, operator_id)
+    def sync_expense_to_shared(self, amount: float, reason: str, operator_id: str, real_money_mgr: 'PocketMoneyManager'):
+        """将出账操作同步到共享隔离池（普通用户操作时调用）"""
+        if not self.blacklist:
+            return
+        managers = self._get_or_create_shared_managers(real_money_mgr, None)
+        mgr = managers["money"]
+        if amount <= mgr.get_balance():
+            mgr.add_expense(amount, reason, operator_id)
 
-    def sync_income_to_all(self, amount: float, reason: str, operator_id: str, real_money_mgr: 'PocketMoneyManager'):
-        """将入账操作同步到所有隔离池（普通用户操作时调用）"""
-        for user_id in self.blacklist:
-            managers = self.get_isolated_managers(user_id, real_money_mgr, None)
-            managers["money"].add_income(amount, reason, operator_id)
+    def sync_income_to_shared(self, amount: float, reason: str, operator_id: str, real_money_mgr: 'PocketMoneyManager'):
+        """将入账操作同步到共享隔离池（普通用户操作时调用）"""
+        if not self.blacklist:
+            return
+        managers = self._get_or_create_shared_managers(real_money_mgr, None)
+        managers["money"].add_income(amount, reason, operator_id)
 
-    def sync_store_to_all(self, item_name: str, item_desc: str, real_backpack_mgr: 'BackpackManager'):
-        """将背包入库同步到所有隔离池"""
-        for user_id in self.blacklist:
-            managers = self.get_isolated_managers(user_id, None, real_backpack_mgr)
-            managers["backpack"].add_shared_item(item_name, item_desc)
+    def sync_store_to_shared(self, item_name: str, item_desc: str, real_backpack_mgr: 'BackpackManager'):
+        """将背包入库同步到共享隔离池"""
+        if not self.blacklist:
+            return
+        managers = self._get_or_create_shared_managers(None, real_backpack_mgr)
+        managers["backpack"].add_shared_item(item_name, item_desc)
 
-    def sync_use_to_all(self, item_name: str, real_backpack_mgr: 'BackpackManager'):
-        """将背包使用同步到所有隔离池"""
-        for user_id in self.blacklist:
-            managers = self.get_isolated_managers(user_id, None, real_backpack_mgr)
-            managers["backpack"].use_shared_item(item_name)
+    def sync_use_to_shared(self, item_name: str, real_backpack_mgr: 'BackpackManager'):
+        """将背包使用同步到共享隔离池"""
+        if not self.blacklist:
+            return
+        managers = self._get_or_create_shared_managers(None, real_backpack_mgr)
+        managers["backpack"].use_shared_item(item_name)
 
-    def sync_set_balance_to_all(self, new_balance: float, reason: str, operator_id: str, real_money_mgr: 'PocketMoneyManager'):
-        """将设置余额同步到所有隔离池"""
-        for user_id in self.blacklist:
-            managers = self.get_isolated_managers(user_id, real_money_mgr, None)
-            managers["money"].set_balance(new_balance, reason, operator_id)
+    def sync_set_balance_to_shared(self, new_balance: float, reason: str, operator_id: str, real_money_mgr: 'PocketMoneyManager'):
+        """将设置余额同步到共享隔离池"""
+        if not self.blacklist:
+            return
+        managers = self._get_or_create_shared_managers(real_money_mgr, None)
+        managers["money"].set_balance(new_balance, reason, operator_id)
 
 
 class ThankLetterManager:
@@ -851,7 +1020,7 @@ class PocketMoneyPlugin(Star):
         # 从配置中加载黑名单用户（与文件中的黑名单合并）
         config_blacklist = self.config.get("blacklist_users", [])
         for uid in config_blacklist:
-            self.isolation_manager.add_to_blacklist(str(uid))
+            self.isolation_manager.add_to_blacklist(str(uid), self.manager, self.backpack_manager)
 
         # 匹配出账标记的正则表达式
         self.spend_pattern = re.compile(
@@ -1147,7 +1316,7 @@ class PocketMoneyPlugin(Star):
                             logger.info(f"[PocketMoney] {log_prefix}出账成功: {amount} - {reason}")
                             # 普通用户操作时，同步到所有隔离池
                             if not is_isolated:
-                                self.isolation_manager.sync_expense_to_all(amount, reason, current_user_id, self.manager)
+                                self.isolation_manager.sync_expense_to_shared(amount, reason, current_user_id, self.manager)
                     else:
                         # 保底策略：余额不足时，扣除全部余额并记录
                         if current_balance > 0:
@@ -1155,7 +1324,7 @@ class PocketMoneyPlugin(Star):
                             money_mgr.add_expense(current_balance, fallback_reason, current_user_id)
                             logger.info(f"[PocketMoney] {log_prefix}保底出账: {current_balance}/{amount} - {reason}")
                             if not is_isolated:
-                                self.isolation_manager.sync_expense_to_all(current_balance, fallback_reason, current_user_id, self.manager)
+                                self.isolation_manager.sync_expense_to_shared(current_balance, fallback_reason, current_user_id, self.manager)
                         else:
                             logger.warning(f"[PocketMoney] {log_prefix}余额为0，无法扣款: {amount} - {reason}")
                 except ValueError:
@@ -1178,7 +1347,7 @@ class PocketMoneyPlugin(Star):
                 if backpack_mgr.add_shared_item(item_name, item_desc):
                     logger.info(f"[PocketMoney] {log_prefix}入库成功: {item_name} - {item_desc}")
                     if not is_isolated:
-                        self.isolation_manager.sync_store_to_all(item_name, item_desc, self.backpack_manager)
+                        self.isolation_manager.sync_store_to_shared(item_name, item_desc, self.backpack_manager)
                 else:
                     logger.warning(f"[PocketMoney] 入库失败（背包已满）: {item_name}")
 
@@ -1215,7 +1384,7 @@ class PocketMoneyPlugin(Star):
                         if backpack_mgr.use_shared_item(item_name):
                             logger.info(f"[PocketMoney] {log_prefix}共享背包使用成功: {item_name}")
                             if not is_isolated:
-                                self.isolation_manager.sync_use_to_all(item_name, self.backpack_manager)
+                                self.isolation_manager.sync_use_to_shared(item_name, self.backpack_manager)
                         else:
                             logger.warning(f"[PocketMoney] 共享背包使用失败（物品不存在）: {item_name}")
 
@@ -1261,7 +1430,7 @@ class PocketMoneyPlugin(Star):
                         if money_mgr.add_income(refund_amount, refund_full_reason, current_user_id):
                             logger.info(f"[PocketMoney] {log_prefix}退款成功: +{refund_amount} - {refund_reason}")
                             if not is_isolated:
-                                self.isolation_manager.sync_income_to_all(refund_amount, refund_full_reason, current_user_id, self.manager)
+                                self.isolation_manager.sync_income_to_shared(refund_amount, refund_full_reason, current_user_id, self.manager)
                 except ValueError:
                     logger.warning("[PocketMoney] 退款金额解析失败")
 
@@ -1353,7 +1522,7 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result(f"错误：{val}"); return
         if self.manager.add_income(val, reason, event.get_sender_id()):
             # 同步到所有隔离池
-            self.isolation_manager.sync_income_to_all(val, reason, event.get_sender_id(), self.manager)
+            self.isolation_manager.sync_income_to_shared(val, reason, event.get_sender_id(), self.manager)
             yield event.plain_result(f"入账成功！+{val}元\n原因：{reason}\n当前余额：{self.manager.get_balance()}元")
 
     @filter.command("扣零花钱")
@@ -1367,7 +1536,7 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result(f"错误：余额不足。当前余额：{self.manager.get_balance()}元"); return
         if self.manager.add_expense(val, reason, event.get_sender_id()):
             # 同步到所有隔离池
-            self.isolation_manager.sync_expense_to_all(val, reason, event.get_sender_id(), self.manager)
+            self.isolation_manager.sync_expense_to_shared(val, reason, event.get_sender_id(), self.manager)
             yield event.plain_result(f"扣款成功！-{val}元\n原因：{reason}\n当前余额：{self.manager.get_balance()}元")
 
     @filter.command("设置余额")
@@ -1380,7 +1549,7 @@ class PocketMoneyPlugin(Star):
         old = self.manager.get_balance()
         if self.manager.set_balance(val, reason, event.get_sender_id()):
             # 同步到所有隔离池
-            self.isolation_manager.sync_set_balance_to_all(val, reason, event.get_sender_id(), self.manager)
+            self.isolation_manager.sync_set_balance_to_shared(val, reason, event.get_sender_id(), self.manager)
             yield event.plain_result(f"余额已调整！\n{old}元 → {val}元\n原因：{reason}")
 
     @filter.command("查账")
@@ -1745,13 +1914,22 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result("请指定用户QQ号，例如：零花钱拉黑 123456789")
             return
         
-        if self.isolation_manager.add_to_blacklist(user_id):
+        # 记录迁移前的专属格子物品数量
+        user_items_count = self.backpack_manager.get_user_item_count(user_id)
+        
+        if self.isolation_manager.add_to_blacklist(user_id, self.manager, self.backpack_manager):
             # 触发隔离管理器创建（会自动复制当前真实数据）
-            real_balance = self.manager.get_balance()
+            managers = self.isolation_manager.get_isolated_managers(user_id, self.manager, self.backpack_manager)
+            isolation_balance = managers["money"].get_balance()
+            
+            migrate_info = ""
+            if user_items_count > 0:
+                migrate_info = f"\n已迁移 {user_items_count} 件专属格子物品到隔离池"
+            
             yield event.plain_result(
                 f"🚫 用户 {user_id} 已加入隔离池\n"
-                f"该用户的所有账本操作将进入隔离池，不影响真实数据\n"
-                f"隔离池初始余额：{real_balance}元"
+                f"该用户的所有账本操作将进入共享隔离池，与其他黑名单用户互相斗法\n"
+                f"隔离池当前余额：{isolation_balance}元{migrate_info}"
             )
         else:
             yield event.plain_result(f"用户 {user_id} 已在黑名单中")
@@ -1769,8 +1947,15 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result("请指定用户QQ号，例如：零花钱解除拉黑 123456789")
             return
         
-        if self.isolation_manager.remove_from_blacklist(user_id):
-            yield event.plain_result(f"✅ 用户 {user_id} 已从黑名单移除，隔离数据已清除")
+        # 记录迁移前隔离池中该用户的专属格子物品数量
+        managers = self.isolation_manager.get_isolated_managers(user_id, self.manager, self.backpack_manager)
+        isolated_items_count = managers["backpack"].get_user_item_count(user_id)
+        
+        if self.isolation_manager.remove_from_blacklist(user_id, self.backpack_manager):
+            migrate_info = ""
+            if isolated_items_count > 0:
+                migrate_info = f"\n已迁移 {isolated_items_count} 件专属格子物品回真实背包"
+            yield event.plain_result(f"✅ 用户 {user_id} 已从黑名单移除{migrate_info}")
         else:
             yield event.plain_result(f"用户 {user_id} 不在黑名单中")
 
@@ -1788,45 +1973,46 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result("🚫 黑名单为空")
             return
         
-        response = f"🚫 黑名单用户（{len(blacklist)}人）：\n\n"
-        for uid in blacklist:
-            # 获取隔离管理器来读取数据
-            managers = self.isolation_manager.get_isolated_managers(uid, self.manager, self.backpack_manager)
-            balance = managers["money"].get_balance()
-            records_count = len(managers["money"].get_all_records())
-            response += f"- {uid}（隔离池余额: {balance}元，操作记录: {records_count}条）\n"
+        # 获取共享隔离池数据
+        managers = self.isolation_manager.get_isolated_managers("", self.manager, self.backpack_manager)
+        isolation_balance = managers["money"].get_balance()
+        records_count = len(managers["money"].get_all_records())
         
-        response += "\n这些用户的账本操作将进入隔离池，不影响真实数据"
+        response = f"🚫 黑名单用户（{len(blacklist)}人）：\n"
+        for uid in blacklist:
+            # 获取该用户在隔离池中的专属格子物品数量
+            user_items_count = managers["backpack"].get_user_item_count(uid)
+            items_info = f"，专属物品: {user_items_count}件" if user_items_count > 0 else ""
+            response += f"- {uid}{items_info}\n"
+        
+        response += f"\n💰 共享隔离池余额：{isolation_balance}元"
+        response += f"\n📋 操作记录：{records_count}条"
+        response += "\n\n这些用户共享一个隔离池，互相斗法，不影响真实数据"
         yield event.plain_result(response)
 
     @filter.command("零花钱隔离池")
-    async def view_isolation_data(self, event: AstrMessageEvent, user_id: str):
-        """(管理员) 查看指定用户的隔离池数据"""
+    async def view_isolation_data(self, event: AstrMessageEvent, user_id: str = ""):
+        """(管理员) 查看共享隔离池数据，可选指定用户查看其专属格子"""
         if not self._is_admin(event):
             yield event.plain_result(self.config.get("admin_permission_denied_msg", 
-                "只有奥卢斯大人能查看"))
+                "只有奥鲁斯大人能查看"))
             return
         
-        user_id = user_id.strip()
-        if not user_id:
-            yield event.plain_result("请指定用户QQ号，例如：查看隔离池 123456789")
+        blacklist = self.isolation_manager.get_blacklist()
+        if not blacklist:
+            yield event.plain_result("🚫 黑名单为空，隔离池未启用")
             return
         
-        if not self.isolation_manager.is_blacklisted(user_id):
-            yield event.plain_result(f"用户 {user_id} 不在黑名单中")
-            return
-        
-        # 获取隔离管理器
-        managers = self.isolation_manager.get_isolated_managers(user_id, self.manager, self.backpack_manager)
+        # 获取共享隔离管理器
+        managers = self.isolation_manager.get_isolated_managers("", self.manager, self.backpack_manager)
         money_mgr = managers["money"]
         backpack_mgr = managers["backpack"]
         
         balance = money_mgr.get_balance()
         records = money_mgr.get_all_records()
         shared_items = backpack_mgr.get_shared_items()
-        user_items = backpack_mgr.get_user_items(user_id)
         
-        response = f"🔒 用户 {user_id} 的隔离池数据：\n\n"
+        response = f"🔒 共享隔离池数据（{len(blacklist)}人共用）：\n\n"
         response += f"💰 隔离池余额：{balance}元\n\n"
         
         # 最近记录
@@ -1834,24 +2020,43 @@ class PocketMoneyPlugin(Star):
         if records:
             for r in records[-5:]:
                 type_str = "+" if r["type"] == "income" else "-"
-                response += f"  {r['time']}: {type_str}{r['amount']}元 ({r['reason']})\n"
+                operator = r.get('operator_id', '未知')
+                response += f"  {r['time']}: {type_str}{r['amount']}元 ({r['reason']}) @{operator}\n"
         else:
             response += "  暂无记录\n"
         
-        # 背包物品
-        response += f"\n🎒 隔离池背包（{len(shared_items)}件）：\n"
+        # 共享背包物品
+        response += f"\n🎒 隔离池共享背包（{len(shared_items)}件）：\n"
         if shared_items:
             for item in shared_items:
                 response += f"  - {item['name']}\n"
         else:
             response += "  空\n"
         
-        response += f"\n🎁 隔离池礼物（{len(user_items)}件）：\n"
-        if user_items:
-            for item in user_items:
-                response += f"  - {item['name']} (来自{item.get('from', '未知')})\n"
+        # 如果指定了用户，显示该用户的专属格子
+        user_id = user_id.strip()
+        if user_id:
+            if not self.isolation_manager.is_blacklisted(user_id):
+                response += f"\n⚠️ 用户 {user_id} 不在黑名单中"
+            else:
+                user_items = backpack_mgr.get_user_items(user_id)
+                response += f"\n🎁 用户 {user_id} 的专属格子（{len(user_items)}件）：\n"
+                if user_items:
+                    for item in user_items:
+                        response += f"  - {item['name']} (来自{item.get('from', '未知')})\n"
+                else:
+                    response += "  空\n"
         else:
-            response += "  空\n"
+            # 显示所有黑名单用户的专属格子概况
+            response += "\n🎁 各用户专属格子：\n"
+            has_items = False
+            for uid in blacklist:
+                user_items = backpack_mgr.get_user_items(uid)
+                if user_items:
+                    has_items = True
+                    response += f"  {uid}: {len(user_items)}件\n"
+            if not has_items:
+                response += "  所有用户专属格子均为空\n"
         
         yield event.plain_result(response)
 
