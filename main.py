@@ -978,6 +978,18 @@ class PocketMoneyManager:
                 return (True, w.get("amount", 0), w.get("reason", ""), w.get("source_info", {}))
         return (False, 0, "申请不存在或已处理", {})
 
+    def ignore_withdrawal(self, application_id: str) -> tuple:
+        """忽略取款申请（静默移除），返回 (成功, 金额, 原因)"""
+        pending = self.data.get("pending_withdrawals", [])
+        for i, w in enumerate(pending):
+            if w.get("id") == application_id and w.get("status") == "pending":
+                amount = w.get("amount", 0)
+                reason = w.get("reason", "")
+                pending.pop(i)
+                self._save_data()
+                return (True, amount, reason)
+        return (False, 0, "申请不存在或已处理")
+
 
 @register("astrbot_plugin_pocketmoney", "柯尔", "贝塔的小金库系统，管理余额和收支记录", "1.7.0")
 # ==================== 版本历史 ====================
@@ -2223,6 +2235,31 @@ class PocketMoneyPlugin(Star):
             f"💰 申请金额：{amount}元\n"
             f"📝 申请原因：{reason}\n"
             f"📒 存折余额：{savings_balance}元"
+        )
+
+    @filter.command("忽略取款")
+    async def ignore_withdrawal(self, event: AstrMessageEvent, application_id: str):
+        """(管理员) 忽略存折取款申请（静默移除，不通知申请人）"""
+        if not self._is_admin(event):
+            yield event.plain_result(self.config.get("admin_permission_denied_msg", 
+                "只有奥卢斯大人能审批取款"))
+            return
+
+        if not application_id.strip():
+            yield event.plain_result("请指定申请ID，例如：忽略取款 1234567890123")
+            return
+
+        success, amount, reason = self.manager.ignore_withdrawal(application_id.strip())
+        
+        if not success:
+            yield event.plain_result(f"忽略失败：{reason}")
+            return
+        
+        yield event.plain_result(
+            f"🔇 取款申请已静默移除\n"
+            f"📋 申请ID：{application_id}\n"
+            f"💰 申请金额：{amount}元\n"
+            f"📝 申请原因：{reason}"
         )
 
     @filter.command("直接取款")
