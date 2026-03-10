@@ -677,7 +677,7 @@ class PocketMoneyManager:
             return {"balance": self.initial_balance, "records": [], "savings_balance": 0, "pending_withdrawals": []}
 
     def _migrate_savings_data(self):
-        """迁移旧的存折数据到小金库"""
+        """迁移旧的存折数据到小金库（仅执行一次）"""
         old_path = os.path.join(self.data_dir, "savings_book.json")
         if os.path.exists(old_path):
             try:
@@ -689,6 +689,10 @@ class PocketMoneyManager:
                         self.data["pending_withdrawals"] = old_data.get("pending_withdrawals", [])
                     self._save_data()
                     logger.info(f"[PocketMoney] 已迁移旧存折数据: 余额{old_data.get('balance', 0)}元")
+                # 迁移完成后重命名旧文件，防止重复迁移覆盖数据
+                migrated_path = old_path + ".migrated"
+                os.rename(old_path, migrated_path)
+                logger.info(f"[PocketMoney] 旧存折文件已重命名为 {migrated_path}")
             except (json.JSONDecodeError, IOError):
                 pass
 
@@ -941,8 +945,11 @@ class PocketMoneyManager:
         """申请取款（AI发起，等待管理员审批）"""
         if amount <= 0 or amount > self.get_savings_balance():
             return ""
-        import time
-        application_id = f"{int(time.time())}{random.randint(100, 999)}"
+        existing_ids = {w.get("id") for w in self.data.get("pending_withdrawals", [])}
+        for _ in range(100):
+            application_id = str(random.randint(1000, 9999))
+            if application_id not in existing_ids:
+                break
         self.data["pending_withdrawals"].append({
             "id": application_id, "amount": amount, "reason": reason,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -955,7 +962,7 @@ class PocketMoneyManager:
         """获取待审批的取款申请"""
         return [w for w in self.data.get("pending_withdrawals", []) if w.get("status") == "pending"]
 
-    def approve_withdrawal(self, application_id: str, operator_id: str = "") -> tuple:
+    def approve_withdrawal(self, application_id: str, operator_id: str = "", approve_reason: str = "") -> tuple:
         """批准取款申请，返回 (成功, 金额, 原因, 来源信息)"""
         for w in self.data.get("pending_withdrawals", []):
             if w.get("id") == application_id and w.get("status") == "pending":
@@ -964,7 +971,12 @@ class PocketMoneyManager:
                     return (False, 0, "余额不足", {})
                 w["status"] = "approved"
                 w["approved_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self.withdraw_from_savings(amount, f"[申请取款] {reason}", operator_id)
+                if approve_reason:
+                    w["approve_reason"] = approve_reason
+                withdraw_reason = f"[申请取款] {reason}"
+                if approve_reason:
+                    withdraw_reason += f"（批准备注：{approve_reason}）"
+                self.withdraw_from_savings(amount, withdraw_reason, operator_id)
                 return (True, amount, reason, w.get("source_info", {}))
         return (False, 0, "申请不存在或已处理", {})
 
@@ -1494,7 +1506,7 @@ class PocketMoneyPlugin(Star):
                                         f"原因：{reason}\n"
                                         f"存折余额：{savings_balance}元\n"
                                         f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                                        f"回复「批准取款 {application_id}」批准\n"
+                                        f"回复「批准取款 {application_id}」或「批准取款 {application_id} 原因」批准\n"
                                         f"回复「拒绝取款 {application_id} 原因」拒绝"
                                     )
                                     await event.bot.send_private_msg(user_id=int(admin_qq), message=notify_msg)
@@ -2141,23 +2153,27 @@ class PocketMoneyPlugin(Star):
         yield event.plain_result(response)
 
     @filter.command("批准取款")
-    async def approve_withdrawal(self, event: AstrMessageEvent, application_id: str):
-        """(管理员) 批准存折取款申请"""
+    async def approve_withdrawal(self, event: AstrMessageEvent, application_id: str, *, reason: str = ""):
+        """(管理员) 批准存折取款申请，可附加原因"""
         if not self._is_admin(event):
             yield event.plain_result(self.config.get("admin_permission_denied_msg", 
                 "只有奥卢斯大人能审批取款"))
             return
 
         if not application_id.strip():
-            yield event.plain_result("请指定申请ID，例如：批准取款 1234567890123")
+            yield event.plain_result("请指定申请ID，例如：批准取款 1234 原因")
             return
 
         operator_id = event.get_sender_id()
-        success, amount, reason, source_info = self.manager.approve_withdrawal(application_id.strip(), operator_id)
+        success, amount, apply_reason, source_info = self.manager.approve_withdrawal(
+            application_id.strip(), operator_id, reason.strip()
+        )
         
         if not success:
-            yield event.plain_result(f"批准失败：{reason}")
+            yield event.plain_result(f"批准失败：{apply_reason}")
             return
+        
+        approve_note = f"（{reason.strip()}）" if reason.strip() else ""
         
         # approve_withdrawal 内部已自动转入小金库
         new_pocket_balance = self.manager.get_balance()
@@ -2166,9 +2182,9 @@ class PocketMoneyPlugin(Star):
         # 向原窗口发送审批结果通知
         if source_info:
             notify_msg = (
-                f"✅ 存折取款申请已批准！\n"
+                f"✅ 存折取款申请已批准{approve_note}！\n"
                 f"💰 取款金额：{amount}元\n"
-                f"📝 原因：{reason}\n"
+                f"📝 原因：{apply_reason}\n"
                 f"💳 小金库余额：{new_pocket_balance}元\n"
                 f"📒 存折余额：{new_savings_balance}元"
             )
@@ -2181,10 +2197,10 @@ class PocketMoneyPlugin(Star):
                 logger.warning(f"[PocketMoney] 发送审批结果通知失败: {e}")
         
         yield event.plain_result(
-            f"✅ 取款申请已批准！\n"
+            f"✅ 取款申请已批准{approve_note}！\n"
             f"📋 申请ID：{application_id}\n"
             f"💰 取款金额：{amount}元\n"
-            f"📝 原因：{reason}\n"
+            f"📝 原因：{apply_reason}\n"
             f"💳 小金库余额：{new_pocket_balance}元\n"
             f"📒 存折余额：{new_savings_balance}元"
         )
@@ -2327,7 +2343,7 @@ class PocketMoneyPlugin(Star):
             )
         
         response += f"📒 存折余额：{self.manager.get_savings_balance()}元\n\n"
-        response += "回复「批准取款 <ID>」批准\n回复「拒绝取款 <ID> <原因>」拒绝"
+        response += "回复「批准取款 <ID>」或「批准取款 <ID> <原因>」批准\n回复「拒绝取款 <ID> <原因>」拒绝"
         
         yield event.plain_result(response)
 
