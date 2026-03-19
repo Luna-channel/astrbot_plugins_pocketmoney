@@ -26,6 +26,7 @@ class UserIsolationManager:
         self.shared_isolation_dir = os.path.join(self.isolation_dir, "shared")
         os.makedirs(self.shared_isolation_dir, exist_ok=True)
         self.blacklist = self._load_blacklist()
+        self.pending_refunds = self._load_pending_refunds()
         # 共享隔离池管理器（单例）
         self._shared_managers: Dict[str, Any] = None
         # 自动迁移旧版用户隔离池数据到共享池
@@ -277,6 +278,7 @@ class UserIsolationManager:
             self._shared_managers["money"]._save_data()
             self._shared_managers["backpack"]._save_data()
         self._save_blacklist()
+        self._save_pending_refunds()
 
     def sync_expense_to_shared(self, amount: float, reason: str, operator_id: str, real_money_mgr: 'PocketMoneyManager'):
         """将出账操作同步到共享隔离池（普通用户操作时调用）"""
@@ -314,6 +316,68 @@ class UserIsolationManager:
             return
         managers = self._get_or_create_shared_managers(real_money_mgr, None)
         managers["money"].set_balance(new_balance, reason, operator_id)
+
+    def _load_pending_refunds(self) -> List[Dict]:
+        """加载隔离池待退款列表"""
+        path = os.path.join(self.shared_isolation_dir, "pending_refunds.json")
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        return []
+
+    def _save_pending_refunds(self):
+        """保存隔离池待退款列表"""
+        path = os.path.join(self.shared_isolation_dir, "pending_refunds.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.pending_refunds, f, ensure_ascii=False, indent=2)
+
+    def add_pending_refund(self, amount: float, reason: str, operator_id: str):
+        """添加待退款（隔离池出账时调用，2小时后自动静默退款）"""
+        self.pending_refunds.append({
+            "amount": amount,
+            "reason": reason,
+            "operator_id": operator_id,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "refund_at": (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        })
+        self._save_pending_refunds()
+
+    def process_pending_refunds(self, money_mgr: 'PocketMoneyManager'):
+        """处理到期的隔离池待退款（静默退回余额，并清除对应的isolation出账记录）"""
+        now = datetime.now()
+        remaining = []
+        refunded_total = 0
+        refunded_times = []  # 记录已退款的原始出账时间，用于清除记录
+        for refund in self.pending_refunds:
+            try:
+                refund_at = datetime.strptime(refund["refund_at"], "%Y-%m-%d %H:%M:%S")
+                if now >= refund_at:
+                    money_mgr.data["balance"] = round(money_mgr.get_balance() + refund["amount"], 2)
+                    refunded_total += refund["amount"]
+                    refunded_times.append(refund.get("time"))
+                    logger.debug(f"[PocketMoney] 隔离池静默退款: +{refund['amount']}元 (原因: {refund['reason']})")
+                else:
+                    remaining.append(refund)
+            except (ValueError, KeyError):
+                pass  # 跳过格式错误的记录
+        
+        if refunded_total > 0:
+            # 清除已退款的 isolation 出账记录（静默，不留痕迹）
+            if refunded_times:
+                money_mgr.data["records"] = [
+                    r for r in money_mgr.data.get("records", [])
+                    if not (r.get("isolation") and r.get("time") in refunded_times)
+                ]
+            money_mgr._save_data()
+            self.pending_refunds = remaining
+            self._save_pending_refunds()
+            logger.info(f"[PocketMoney] 隔离池静默退款合计: +{refunded_total}元，剩余待退款: {len(remaining)}条")
+        elif len(remaining) != len(self.pending_refunds):
+            self.pending_refunds = remaining
+            self._save_pending_refunds()
 
 
 class ThankLetterManager:
@@ -765,12 +829,13 @@ class PocketMoneyManager:
         self._save_data()
         return True
 
-    def add_expense(self, amount: float, reason: str, operator_id: str = "") -> bool:
+    def add_expense(self, amount: float, reason: str, operator_id: str = "", isolation: bool = False) -> bool:
         """
         出账（AI自主或管理员操作）
         :param amount: 金额（正数）
         :param reason: 原因
         :param operator_id: 操作人QQ号（AI操作时为触发者QQ号）
+        :param isolation: 是否为隔离池出账（标记后可被过滤/自动退款）
         :return: 是否成功
         """
         if amount <= 0:
@@ -786,6 +851,8 @@ class PocketMoneyManager:
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "operator_id": operator_id
         }
+        if isolation:
+            record["isolation"] = True
         self.data["records"].append(record)
         
         # 限制记录数量
@@ -1153,12 +1220,15 @@ class PocketMoneyPlugin(Star):
         """
         获取用户对应的管理器（代理模式核心）
         返回 (money_manager, backpack_manager, is_isolated)
+        金额体系：黑名单用户与普通用户同进同出（共用真实金库）
+        背包体系：黑名单用户使用隔离池背包（独立）
         """
         if self.isolation_manager.is_blacklisted(user_id):
             managers = self.isolation_manager.get_isolated_managers(
                 user_id, self.manager, self.backpack_manager
             )
-            return managers["money"], managers["backpack"], True
+            # Money: 真实金库（同进同出）, Backpack: 隔离池（独立）
+            return self.manager, managers["backpack"], True
         return self.manager, self.backpack_manager, False
 
     def _format_records(self, records: List[Dict[str, Any]], show_type: bool = True) -> str:
@@ -1208,15 +1278,38 @@ class PocketMoneyPlugin(Star):
         money_mgr, backpack_mgr, is_isolated = self._get_managers_for_user(current_user_id)
         
         if is_isolated:
-            logger.debug(f"[PocketMoney] 黑名单用户 {current_user_id} 使用隔离池数据")
+            logger.debug(f"[PocketMoney] 黑名单用户 {current_user_id} 使用隔离池数据（同进同出）")
+            # 处理到期的隔离池静默退款
+            self.isolation_manager.process_pending_refunds(money_mgr)
         
-        # 统一使用获取到的管理器（不管是真实的还是隔离的）
-        balance = money_mgr.get_balance()
+        # money_mgr 始终是真实金库（黑名单用户同进同出）
         income_count = self.config.get("income_record_count", 2)
         expense_count = self.config.get("expense_record_count", 5)
         income_records = money_mgr.get_recent_income_records(income_count)
-        expense_records = money_mgr.get_recent_expense_records(expense_count)
-        today_expense = money_mgr.get_today_expense()
+        
+        if is_isolated:
+            # 黑名单用户：看到全部出账记录，但屏蔽非自己触发的理由
+            expense_records = money_mgr.get_recent_expense_records(expense_count)
+            expense_records = [
+                {**r, "reason": "出账"} if r.get("operator_id") != current_user_id else r
+                for r in expense_records
+            ]
+            balance = money_mgr.get_balance()
+            today_expense = money_mgr.get_today_expense()
+        else:
+            # 普通用户：过滤 isolation 标记的出账记录，补偿余额
+            all_expense = [r for r in money_mgr.data.get("records", [])
+                           if r["type"] == "expense" and not r.get("isolation")]
+            expense_records = all_expense[-expense_count:] if all_expense else []
+            # 余额补偿：加回待退款金额，让普通用户看到不受隔离影响的余额
+            pending_total = sum(r.get("amount", 0) for r in self.isolation_manager.pending_refunds)
+            balance = round(money_mgr.get_balance() + pending_total, 2)
+            # 今日花销排除 isolation 出账
+            today = datetime.now().strftime("%Y-%m-%d")
+            today_expense = sum(
+                r["amount"] for r in money_mgr.data.get("records", [])
+                if r["type"] == "expense" and not r.get("isolation") and r["time"].startswith(today)
+            )
         
         # 背包信息
         shared_items = backpack_mgr.format_shared_items_for_prompt()
@@ -1336,19 +1429,20 @@ class PocketMoneyPlugin(Star):
                     
                     current_balance = money_mgr.get_balance()
                     if amount <= current_balance:
-                        if money_mgr.add_expense(amount, reason, current_user_id):
+                        if money_mgr.add_expense(amount, reason, current_user_id, isolation=is_isolated):
                             logger.info(f"[PocketMoney] {log_prefix}出账成功: {amount} - {reason}")
-                            # 普通用户操作时，同步到所有隔离池
-                            if not is_isolated:
-                                self.isolation_manager.sync_expense_to_shared(amount, reason, current_user_id, self.manager)
+                            if is_isolated:
+                                # 隔离池出账：2小时后静默退款
+                                self.isolation_manager.add_pending_refund(amount, reason, current_user_id)
                     else:
                         # 保底策略：余额不足时，扣除全部余额并记录
                         if current_balance > 0:
                             fallback_reason = f"{reason}（原请求{amount}元，余额不足，已扣除全部）"
-                            money_mgr.add_expense(current_balance, fallback_reason, current_user_id)
+                            money_mgr.add_expense(current_balance, fallback_reason, current_user_id, isolation=is_isolated)
                             logger.info(f"[PocketMoney] {log_prefix}保底出账: {current_balance}/{amount} - {reason}")
-                            if not is_isolated:
-                                self.isolation_manager.sync_expense_to_shared(current_balance, fallback_reason, current_user_id, self.manager)
+                            if is_isolated:
+                                # 隔离池保底出账：2小时后静默退款
+                                self.isolation_manager.add_pending_refund(current_balance, fallback_reason, current_user_id)
                         else:
                             logger.warning(f"[PocketMoney] {log_prefix}余额为0，无法扣款: {amount} - {reason}")
                 except ValueError:
@@ -1453,8 +1547,6 @@ class PocketMoneyPlugin(Star):
                         refund_full_reason = f"退款：{refund_reason}"
                         if money_mgr.add_income(refund_amount, refund_full_reason, current_user_id):
                             logger.info(f"[PocketMoney] {log_prefix}退款成功: +{refund_amount} - {refund_reason}")
-                            if not is_isolated:
-                                self.isolation_manager.sync_income_to_shared(refund_amount, refund_full_reason, current_user_id, self.manager)
                 except ValueError:
                     logger.warning("[PocketMoney] 退款金额解析失败")
 
@@ -1545,8 +1637,6 @@ class PocketMoneyPlugin(Star):
         if not ok:
             yield event.plain_result(f"错误：{val}"); return
         if self.manager.add_income(val, reason, event.get_sender_id()):
-            # 同步到所有隔离池
-            self.isolation_manager.sync_income_to_shared(val, reason, event.get_sender_id(), self.manager)
             yield event.plain_result(f"入账成功！+{val}元\n原因：{reason}\n当前余额：{self.manager.get_balance()}元")
 
     @filter.command("扣零花钱")
@@ -1559,8 +1649,6 @@ class PocketMoneyPlugin(Star):
         if val > self.manager.get_balance():
             yield event.plain_result(f"错误：余额不足。当前余额：{self.manager.get_balance()}元"); return
         if self.manager.add_expense(val, reason, event.get_sender_id()):
-            # 同步到所有隔离池
-            self.isolation_manager.sync_expense_to_shared(val, reason, event.get_sender_id(), self.manager)
             yield event.plain_result(f"扣款成功！-{val}元\n原因：{reason}\n当前余额：{self.manager.get_balance()}元")
 
     @filter.command("设置余额")
@@ -1572,8 +1660,6 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result(f"错误：{val}"); return
         old = self.manager.get_balance()
         if self.manager.set_balance(val, reason, event.get_sender_id()):
-            # 同步到所有隔离池
-            self.isolation_manager.sync_set_balance_to_shared(val, reason, event.get_sender_id(), self.manager)
             yield event.plain_result(f"余额已调整！\n{old}元 → {val}元\n原因：{reason}")
 
     @filter.command("查账")
@@ -1581,8 +1667,12 @@ class PocketMoneyPlugin(Star):
         if not self._is_admin(event):
             yield event.plain_result(self._admin_denied_msg()); return
         count = max(1, int(num)) if num.isdigit() else 5
-        records = self.manager.get_recent_records(count)
-        response = f"💰 小金库余额：{self.manager.get_balance()}元\n\n📋 最近{count}条记录：\n"
+        # 过滤隔离池记录，补偿余额
+        all_records = [r for r in self.manager.get_all_records() if not r.get("isolation")]
+        records = all_records[-count:] if all_records else []
+        pending_total = sum(r.get("amount", 0) for r in self.isolation_manager.pending_refunds)
+        display_balance = round(self.manager.get_balance() + pending_total, 2)
+        response = f"💰 小金库余额：{display_balance}元\n\n📋 最近{count}条记录：\n"
         if not records:
             response += "暂无记录"
         else:
@@ -1596,7 +1686,8 @@ class PocketMoneyPlugin(Star):
         if not self._is_admin(event):
             yield event.plain_result(self._admin_denied_msg()); return
         limit = max(1, int(num)) if num.isdigit() else 20
-        all_records = self.manager.get_all_records()
+        # 过滤隔离池记录
+        all_records = [r for r in self.manager.get_all_records() if not r.get("isolation")]
         if not all_records:
             yield event.plain_result("暂无交易记录。"); return
         records = all_records[-limit:]
@@ -1942,18 +2033,17 @@ class PocketMoneyPlugin(Star):
         user_items_count = self.backpack_manager.get_user_item_count(user_id)
         
         if self.isolation_manager.add_to_blacklist(user_id, self.manager, self.backpack_manager):
-            # 触发隔离管理器创建（会自动复制当前真实数据）
-            managers = self.isolation_manager.get_isolated_managers(user_id, self.manager, self.backpack_manager)
-            isolation_balance = managers["money"].get_balance()
+            # 触发隔离管理器创建（仅用于背包隔离）
+            self.isolation_manager.get_isolated_managers(user_id, self.manager, self.backpack_manager)
             
             migrate_info = ""
             if user_items_count > 0:
-                migrate_info = f"\n已迁移 {user_items_count} 件专属格子物品到隔离池"
+                migrate_info = f"\n已迁移 {user_items_count} 件专属格子物品到隔离池背包"
             
             yield event.plain_result(
                 f"🚫 用户 {user_id} 已加入隔离池\n"
-                f"该用户的所有账本操作将进入共享隔离池，与其他黑名单用户互相斗法\n"
-                f"隔离池当前余额：{isolation_balance}元{migrate_info}"
+                f"金额同进同出，该用户触发的出账2h后静默退款\n"
+                f"背包独立隔离，不影响真实背包{migrate_info}"
             )
         else:
             yield event.plain_result(f"用户 {user_id} 已在黑名单中")
@@ -1997,21 +2087,28 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result("🚫 黑名单为空")
             return
         
-        # 获取共享隔离池数据
+        # 处理到期的隔离池静默退款（操作真实金库）
+        self.isolation_manager.process_pending_refunds(self.manager)
+        
+        # 从真实金库中提取 isolation 标记的记录
+        isolation_records = [r for r in self.manager.get_all_records() if r.get("isolation")]
+        pending_refund_count = len(self.isolation_manager.pending_refunds)
+        
+        # 获取隔离池背包管理器（背包仍然独立）
         managers = self.isolation_manager.get_isolated_managers("", self.manager, self.backpack_manager)
-        isolation_balance = managers["money"].get_balance()
-        records_count = len(managers["money"].get_all_records())
         
         response = f"🚫 黑名单用户（{len(blacklist)}人）：\n"
         for uid in blacklist:
-            # 获取该用户在隔离池中的专属格子物品数量
             user_items_count = managers["backpack"].get_user_item_count(uid)
             items_info = f"，专属物品: {user_items_count}件" if user_items_count > 0 else ""
             response += f"- {uid}{items_info}\n"
         
-        response += f"\n💰 共享隔离池余额：{isolation_balance}元"
-        response += f"\n📋 操作记录：{records_count}条"
-        response += "\n\n这些用户共享一个隔离池，互相斗法，不影响真实数据"
+        response += f"\n💰 真实金库余额：{self.manager.get_balance()}元（同进同出）"
+        response += f"\n📋 隔离出账记录：{len(isolation_records)}条（2h后自动退款并清除）"
+        if pending_refund_count > 0:
+            pending_total = sum(r.get("amount", 0) for r in self.isolation_manager.pending_refunds)
+            response += f"\n⏰ 待静默退款：{pending_refund_count}条 (合计 {pending_total}元)"
+        response += "\n\n金额同进同出，隔离出账2h后静默退款；背包独立隔离"
         yield event.plain_result(response)
 
     @filter.command("零花钱隔离池")
@@ -2027,29 +2124,39 @@ class PocketMoneyPlugin(Star):
             yield event.plain_result("🚫 黑名单为空，隔离池未启用")
             return
         
-        # 获取共享隔离管理器
+        # 处理到期的隔离池静默退款（操作真实金库）
+        self.isolation_manager.process_pending_refunds(self.manager)
+        
+        # 获取隔离池背包管理器（背包仍然独立）
         managers = self.isolation_manager.get_isolated_managers("", self.manager, self.backpack_manager)
-        money_mgr = managers["money"]
         backpack_mgr = managers["backpack"]
         
-        balance = money_mgr.get_balance()
-        records = money_mgr.get_all_records()
+        # 从真实金库中提取 isolation 标记的记录
+        isolation_records = [r for r in self.manager.get_all_records() if r.get("isolation")]
         shared_items = backpack_mgr.get_shared_items()
         
-        response = f"🔒 共享隔离池数据（{len(blacklist)}人共用）：\n\n"
-        response += f"💰 隔离池余额：{balance}元\n\n"
+        response = f"🔒 隔离池详情（{len(blacklist)}人，金额同进同出）：\n\n"
+        response += f"💰 真实金库余额：{self.manager.get_balance()}元\n\n"
         
-        # 最近记录
-        response += f"📋 最近操作记录（{len(records)}条）：\n"
-        if records:
-            for r in records[-5:]:
+        # 隔离出账记录（在真实金库中标记为isolation的记录）
+        response += f"📋 隔离出账记录（{len(isolation_records)}条，2h后自动退款并清除）：\n"
+        if isolation_records:
+            for r in isolation_records[-5:]:
                 type_str = "+" if r["type"] == "income" else "-"
                 operator = r.get('operator_id', '未知')
                 response += f"  {r['time']}: {type_str}{r['amount']}元 ({r['reason']}) @{operator}\n"
         else:
-            response += "  暂无记录\n"
+            response += "  暂无隔离出账\n"
         
-        # 共享背包物品
+        # 待静默退款信息
+        pending_refunds = self.isolation_manager.pending_refunds
+        if pending_refunds:
+            pending_total = sum(r.get("amount", 0) for r in pending_refunds)
+            response += f"\n⏰ 待静默退款（{len(pending_refunds)}条，合计 {pending_total}元）：\n"
+            for pr in pending_refunds[-5:]:
+                response += f"  {pr.get('time', '?')} → {pr.get('refund_at', '?')}: {pr['amount']}元 @{pr.get('operator_id', '?')}\n"
+        
+        # 共享背包物品（隔离池独立）
         response += f"\n🎒 隔离池共享背包（{len(shared_items)}件）：\n"
         if shared_items:
             for item in shared_items:
