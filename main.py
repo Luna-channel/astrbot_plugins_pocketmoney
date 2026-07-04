@@ -1070,7 +1070,7 @@ class PocketMoneyManager:
         return (False, 0, "申请不存在或已处理")
 
 
-@register("astrbot_plugin_pocketmoney", "柯尔", "给机器人设计的小金库系统和小背包系统，增加一些rp乐趣", "1.8.0")
+@register("astrbot_plugin_pocketmoney", "柯尔", "给机器人设计的小金库系统和小背包系统，增加一些rp乐趣", "1.8.1")
 # ==================== 版本历史 ====================
 # v1.0 - 基础零花钱：余额管理、入账/出账、记录查询
 # v1.1 - 表扬信/投诉信系统：每日限制、排行榜、随机奖金 
@@ -1081,6 +1081,7 @@ class PocketMoneyManager:
 # v1.6 - 存折系统：管理员保管的钱，AI申请取款需审批
 # v1.7 - 代码重构：删除压岁钱系统，合并存折到小金库，移除硬编码提示词
 # v1.8 - 转公开插件：移除个人化内容，笔记改为仅管理员可写
+# v1.8.1 - 修复背包标记误匹配，补充背包判定提示，增加入库失败反馈
 # ==================================================
 class PocketMoneyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -1116,7 +1117,7 @@ class PocketMoneyPlugin(Star):
 
         # 匹配出账标记的正则表达式
         self.spend_pattern = re.compile(
-            r"\s*\[(?=[^\]]*(?:Spend|花费|支出))[^\]]*\]\s*",
+            r"\s*\[\s*(?:Spend|花费|支出)\s*[:：][^\]]*\]\s*",
             re.IGNORECASE | re.DOTALL
         )
         self.amount_pattern = re.compile(r"(?:Spend|花费|支出)\s*[:：]\s*(\d+(?:\.\d+)?)")
@@ -1127,7 +1128,7 @@ class PocketMoneyPlugin(Star):
         
         # 匹配背包入库标记: [Store: 物品名, Desc: 描述]
         self.store_pattern = re.compile(
-            r"\s*\[(?=[^\]]*(?:Store|入库|收纳))[^\]]*\]\s*",
+            r"\s*\[\s*(?:Store|入库|收纳)\s*[:：][^\]]*\]\s*",
             re.IGNORECASE | re.DOTALL
         )
         self.store_name_pattern = re.compile(r"(?:Store|入库|收纳)\s*[:：]\s*(.+?)(?=\s*[,，])")
@@ -1135,14 +1136,14 @@ class PocketMoneyPlugin(Star):
         
         # 匹配背包使用标记: [Use: 物品名] - 排除UseGift
         self.use_pattern = re.compile(
-            r"\s*\[(?=[^\]]*(?:(?<!e)Use(?!Gift)|使用(?!礼物)|用掉))[^\]]*\]\s*",
+            r"\s*\[\s*(?:(?<!e)Use(?!Gift)|使用(?!礼物)|用掉)\s*[:：][^\]]*\]\s*",
             re.IGNORECASE | re.DOTALL
         )
         self.use_name_pattern = re.compile(r"(?<!e)(?:Use)(?!Gift)\s*[:：]\s*(.+?)(?=\s*\])|(?:使用)(?!礼物)\s*[:：]\s*(.+?)(?=\s*\])|(?:用掉)\s*[:：]\s*(.+?)(?=\s*\])", re.IGNORECASE)
         
         # 匹配礼物入库标记: [Gift: 物品名, From: 送礼人, Desc: 描述]
         self.gift_pattern = re.compile(
-            r"\s*\[(?=[^\]]*(?:Gift|礼物|收礼))[^\]]*\]\s*",
+            r"\s*\[\s*(?:Gift|礼物|收礼)\s*[:：][^\]]*\]\s*",
             re.IGNORECASE | re.DOTALL
         )
         self.gift_name_pattern = re.compile(r"(?:Gift|礼物|收礼)\s*[:：]\s*(.+?)(?=\s*[,\uff0c])")
@@ -1151,14 +1152,14 @@ class PocketMoneyPlugin(Star):
         
         # 匹配使用专属格子物品标记: [UseGift: 物品名]
         self.use_gift_pattern = re.compile(
-            r"\s*\[(?=[^\]]*(?:UseGift|使用礼物|用礼物))[^\]]*\]\s*",
+            r"\s*\[\s*(?:UseGift|使用礼物|用礼物)\s*[:：][^\]]*\]\s*",
             re.IGNORECASE | re.DOTALL
         )
         self.use_gift_name_pattern = re.compile(r"(?:UseGift|使用礼物|用礼物)\s*[:：]\s*(.+?)(?=\s*\])")
         
         # 匹配退款标记: [Refund: 金额, Reason: 原因]
         self.refund_pattern = re.compile(
-            r"\s*\[(?=[^\]]*(?:Refund|退款|退钱))[^\]]*\]\s*",
+            r"\s*\[\s*(?:Refund|退款|退钱)\s*[:：][^\]]*\]\s*",
             re.IGNORECASE | re.DOTALL
         )
         self.refund_amount_pattern = re.compile(r"(?:Refund|退款|退钱)\s*[:：]\s*(\d+(?:\.\d+)?)")
@@ -1166,14 +1167,14 @@ class PocketMoneyPlugin(Star):
         
         # 匹配笔记标记: [Note: 内容] 或 [笔记: 内容]
         self.note_pattern = re.compile(
-            r"\s*\[(?=[^\]]*(?:Note|笔记|备忘|记录))[^\]]*\]\s*",
+            r"\s*\[\s*(?:Note|笔记|备忘|记录)\s*[:：][^\]]*\]\s*",
             re.IGNORECASE | re.DOTALL
         )
         self.note_content_pattern = re.compile(r"(?:Note|笔记|备忘|记录)\s*[:：]\s*(.+?)(?=\s*\])")
         
         # 匹配申请取款标记: [ApplyWithdraw: 金额, Reason: 原因]
         self.apply_withdraw_pattern = re.compile(
-            r"\s*\[(?=[^\]]*(?:ApplyWithdraw|申请取款|取存折))[^\]]*\]\s*",
+            r"\s*\[\s*(?:ApplyWithdraw|申请取款|取存折)\s*[:：][^\]]*\]\s*",
             re.IGNORECASE | re.DOTALL
         )
         self.apply_withdraw_amount_pattern = re.compile(r"(?:ApplyWithdraw|申请取款|取存折)\s*[:：]\s*(\d+(?:\.\d+)?)")
@@ -1373,6 +1374,15 @@ class PocketMoneyPlugin(Star):
             user_items=user_items
         )
 
+        backpack_prompt += (
+            "\n【背包判定补充】\n"
+            "1. 用户说“放到你的包里”“塞进你的包里”“你收着”“你自己留着”时，"
+            "这是放进你的共享背包，使用 [Store: <物品名>, Desc: <简短描述>]。\n"
+            "2. 只有用户明确说这是送给某个人的礼物、某人的专属物品，才使用 "
+            "[Gift: <物品名>, From: <送礼人>, Desc: <简短描述>]。\n"
+            "3. 如果用户只是让你拿着、收下、放包里，不要使用 Gift。"
+        )
+
         req.system_prompt += f"\n{pocketmoney_prompt}"
         req.system_prompt += f"\n{backpack_prompt}"
         
@@ -1410,6 +1420,7 @@ class PocketMoneyPlugin(Star):
         if is_isolated:
             logger.debug(f"[PocketMoney] 黑名单用户 {current_user_id} 的操作将进入隔离池")
         log_prefix = "[隔离池] " if is_isolated else ""
+        feedback_messages = []
 
         # 处理出账标记
         spend_matches = list(self.spend_pattern.finditer(cleaned_text))
@@ -1471,6 +1482,7 @@ class PocketMoneyPlugin(Star):
                         self.isolation_manager.sync_store_to_shared(item_name, item_desc, self.backpack_manager)
                 else:
                     logger.warning(f"[PocketMoney] 入库失败（背包已满）: {item_name}")
+                    feedback_messages.append(f"共享背包已经满了，{item_name} 没放进去。")
 
         # 【重要】先处理UseGift，再处理Use，避免Use误匹配UseGift
         use_gift_matches = list(self.use_gift_pattern.finditer(cleaned_text))
@@ -1530,6 +1542,7 @@ class PocketMoneyPlugin(Star):
                         logger.info(f"[PocketMoney] {log_prefix}礼物入库成功: {gift_name} (来自{gift_from})")
                     else:
                         logger.warning(f"[PocketMoney] 礼物入库失败（专属格子已满）: {gift_name}")
+                        feedback_messages.append(f"{current_user_name}的专属格子已经满了，{gift_name} 没放进去。")
 
         # 处理退款标记: [Refund: 金额, Reason: 原因]
         refund_matches = list(self.refund_pattern.finditer(cleaned_text))
@@ -1611,6 +1624,10 @@ class PocketMoneyPlugin(Star):
                             logger.warning(f"[PocketMoney] 存折余额不足: 需要 {amount}，当前 {savings_balance}")
                 except ValueError:
                     logger.warning("[PocketMoney] 申请取款金额解析失败")
+
+        if feedback_messages:
+            feedback_text = "\n".join(feedback_messages)
+            cleaned_text = f"{cleaned_text}\n{feedback_text}".strip() if cleaned_text else feedback_text
 
         resp.completion_text = cleaned_text
 
