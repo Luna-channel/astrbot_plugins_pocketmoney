@@ -801,6 +801,19 @@ class PocketMoneyManager:
         """获取所有记录"""
         return self.data.get("records", [])
 
+    def get_refundable_amount(self, include_isolation: bool = False) -> float:
+        """获取当前还可退款的出账额度。"""
+        records = self.data.get("records", [])
+        total_expense = sum(
+            r.get("amount", 0) for r in records
+            if r.get("type") == "expense" and (include_isolation or not r.get("isolation"))
+        )
+        total_refund = sum(
+            r.get("amount", 0) for r in records
+            if r.get("type") == "income" and str(r.get("reason", "")).startswith("退款：")
+        )
+        return round(max(total_expense - total_refund, 0), 2)
+
     def add_income(self, amount: float, reason: str, operator_id: str = "") -> bool:
         """
         入账（只能由管理员操作）
@@ -1560,9 +1573,16 @@ class PocketMoneyPlugin(Star):
                     refund_reason = refund_reason_match.group(1).strip() if refund_reason_match else "退款"
                     
                     if refund_amount > 0:
-                        refund_full_reason = f"退款：{refund_reason}"
-                        if money_mgr.add_income(refund_amount, refund_full_reason, current_user_id):
-                            logger.info(f"[PocketMoney] {log_prefix}退款成功: +{refund_amount} - {refund_reason}")
+                        refundable_amount = money_mgr.get_refundable_amount()
+                        if refund_amount <= refundable_amount:
+                            refund_full_reason = f"退款：{refund_reason}"
+                            if money_mgr.add_income(refund_amount, refund_full_reason, current_user_id):
+                                logger.info(f"[PocketMoney] {log_prefix}退款成功: +{refund_amount} - {refund_reason}")
+                        else:
+                            logger.warning(
+                                f"[PocketMoney] {log_prefix}退款失败：退款金额 {refund_amount} 超过可退款额度 {refundable_amount} - {refund_reason}"
+                            )
+                            feedback_messages.append("小金库出错：好像没花过这笔钱")
                 except ValueError:
                     logger.warning("[PocketMoney] 退款金额解析失败")
 
